@@ -83,6 +83,14 @@ npm run deploy
 - Smart Placement：Worker 尽量调度到靠近 GitHub 的位置，降低回源 RTT
 - 日志：代理请求与错误响应记录路径、方法、状态码、耗时、缓存状态；静态资源流量不记日志，不记录请求头
 
+### 性能与缓存
+
+- **Range 首次请求**：可缓存对象（≤400MB）改为"拉全量 + 本地切片"，同时填充缓存，后续 Range/全量下载直接命中；超过上限的对象透传 Range
+- **建议在 zone 上启用 Cache Rule**（控制台或 API，不随仓库部署）：表达式 `http.request.uri.path contains "github.com"`，Cache eligibility = Eligible，Edge TTL 跟随源站。这样重复下载与断点续传可由离客户端最近的边缘节点直接返回，不必再转发到 Smart Placement 选定的执行节点
+- **Smart Placement 权衡**：Worker 靠近 GitHub 可降低回源 RTT，但客户端到执行节点多一跳；如果客户端吞吐比首包延迟更重要，可删除 `wrangler.jsonc` 里的 `placement` 后对比
+- **api.github.com**：未认证调用使用 Worker 共享出口 IP（Cloudflare 网段），GitHub 限额 60 次/小时，容易被其他使用者耗尽而返回 403。请在请求中带 `Authorization`，代理会原样透传
+- 错误响应与带 `Authorization` 的响应均返回 `cache-control: no-store`，不会被任何共享缓存（含边缘 Cache Rule）缓存
+
 ### 开发与测试
 
 - `npm run dev`：本地开发（需要能运行 workerd 的环境）

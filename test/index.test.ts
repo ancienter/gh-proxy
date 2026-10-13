@@ -5,6 +5,7 @@ import worker from '../src/index'
 interface MockCall {
     url: URL
     method: string
+    headers?: Headers
     body: BodyInit | null | undefined
     signal: AbortSignal | null | undefined
 }
@@ -38,7 +39,13 @@ beforeAll(() => {
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
         const method = init?.method || (input instanceof Request ? input.method : 'GET')
-        const call: MockCall = { url: new URL(url), method, body: init?.body, signal: init?.signal }
+        const call: MockCall = {
+            url: new URL(url),
+            method,
+            headers: init?.headers ? new Headers(init.headers) : undefined,
+            body: init?.body,
+            signal: init?.signal,
+        }
         calls.push(call)
         const res = responder(call)
         if (!res) {
@@ -351,6 +358,59 @@ describe('cache', () => {
         expect(await head.text()).toBe('')
     })
 
+    it('serves a cold range from a full fetch and fills the cache', async () => {
+        const upstream = 'https://github.com/cachetest/range/releases/download/v1/file.bin'
+        const viaProxy = 'https://example.com/https://github.com/cachetest/range/releases/download/v1/file.bin'
+        const upstreamRanges: string[] = []
+        responder = (call) => {
+            if (call.url.href !== upstream) {
+                return null
+            }
+            upstreamRanges.push(call.headers?.get('range') || 'full')
+            return new Response('0123456789', {
+                status: 200,
+                headers: { 'content-length': '10', 'accept-ranges': 'bytes', 'etag': '"v1"' },
+            })
+        }
+
+        const ranged = await call(viaProxy, { headers: { range: 'bytes=2-5' } })
+        expect(ranged.status).toBe(206)
+        expect(ranged.headers.get('content-range')).toBe('bytes 2-5/10')
+        expect(ranged.headers.get('content-length')).toBe('4')
+        expect(await ranged.text()).toBe('2345')
+        expect(upstreamRanges).toEqual(['full'])
+
+        const full = await call(viaProxy)
+        expect(full.headers.get('x-proxy-cache')).toBe('HIT')
+        expect(await full.text()).toBe('0123456789')
+        expect(upstreamRanges).toEqual(['full'])
+    })
+
+    it('falls back to forwarding Range for objects above the cache limit', async () => {
+        const upstream = 'https://github.com/cachetest/rangebig/releases/download/v1/big.bin'
+        const viaProxy = 'https://example.com/https://github.com/cachetest/rangebig/releases/download/v1/big.bin'
+        responder = (call) => {
+            if (call.url.href !== upstream) {
+                return null
+            }
+            if (call.headers?.get('range')) {
+                return new Response('ab', {
+                    status: 206,
+                    headers: { 'content-length': '2', 'content-range': 'bytes 0-1/500000000', 'accept-ranges': 'bytes' },
+                })
+            }
+            return new Response('x', {
+                status: 200,
+                headers: { 'content-length': String(500 * 1024 * 1024), 'accept-ranges': 'bytes' },
+            })
+        }
+
+        const res = await call(viaProxy, { headers: { range: 'bytes=0-1' } })
+        expect(res.status).toBe(206)
+        expect(res.headers.get('content-range')).toBe('bytes 0-1/500000000')
+        expect(await res.text()).toBe('ab')
+    })
+
     it('revalidates rolling assets with a short TTL', async () => {
         const dbUpstream = 'https://github.com/cachetest/geo/releases/download/v2/geoip.db'
         const dbViaProxy = 'https://example.com/https://github.com/cachetest/geo/releases/download/v2/geoip.db'
@@ -374,8 +434,11 @@ describe('cache', () => {
             return text('missing', 404)
         })
 
-        expect((await call(viaProxy404)).status).toBe(404)
-        expect((await call(viaProxy404)).status).toBe(404)
+        const first = await call(viaProxy404)
+        expect(first.status).toBe(404)
+        expect(first.headers.get('cache-control')).toBe('no-store')
+        const second = await call(viaProxy404)
+        expect(second.status).toBe(404)
         expect(upstreamCalls).toBe(2)
     })
 
@@ -409,6 +472,7 @@ describe('cache', () => {
 
         const authorized = await call(authViaProxy, { headers: { authorization: 'Bearer token' } })
         expect(authorized.headers.get('x-proxy-cache')).toBe('BYPASS')
+        expect(authorized.headers.get('cache-control')).toBe('no-store')
         expect(await authorized.text()).toBe('secret')
 
         const anonymous = await call(authViaProxy)

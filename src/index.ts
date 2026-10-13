@@ -23,7 +23,7 @@ const CACHE_NAME = 'gh-proxy'
 // Cache API 单对象上限为 512MB，留出余量
 const CACHE_MAX_BYTES = 400 * 1024 * 1024
 const IMMUTABLE_TTL = 31536000
-const ROLLING_TTL = 60
+const ROLLING_TTL = 300
 const CACHE_STATUS_HEADER = 'x-proxy-cache'
 const ROLLING_EXT_RE = /\.(?:db|mmdb|srs|dat)$/i
 const HEALTHZ_PATH = '/healthz'
@@ -330,7 +330,10 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
         // 客户端断开时同步中止上游请求
         signal: req.signal,
     }
-    const res = await proxy(urlObj, reqInit, cfg)
+    const rangeHeader = reqHdrRaw.get('range')
+    const res = cacheable && policy && req.method === 'GET' && rangeHeader
+        ? await serveRangeFromOrigin(reqInit, urlObj, cfg, cache, policy, ctx, rangeHeader)
+        : await proxy(urlObj, reqInit, cfg)
 
     if (cacheable && policy && req.method === 'GET' && res.status === 200 && isStorable(res)) {
         // 缓存副本必须保留原始 response（含 content-length），
@@ -341,11 +344,112 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
         ctx.waitUntil(cache.put(new Request(urlObj.href, { method: 'GET' }), stored).catch(() => { }))
     }
 
+    // 错误响应与私有仓库响应禁止任何共享缓存（含 zone 级 Cache Rule）
+    if (res.status >= 400 || reqHdrRaw.has('authorization')) {
+        res.headers.set('cache-control', 'no-store')
+    }
+
     return withCacheStatus(res, cacheable ? 'MISS' : 'BYPASS')
 }
 
-function cacheKeyRequest(urlObj: URL, req: Request): Request {
-    const headers = new Headers()
+interface ByteRange {
+    start: number
+    end: number
+}
+
+function parseByteRange(header: string, total: number): ByteRange | null {
+    const match = /^bytes=(\d+)-(\d*)$/.exec(header.trim())
+    if (!match) {
+        return null
+    }
+    const start = Number(match[1])
+    const end = match[2] ? Number(match[2]) : total - 1
+    if (!Number.isFinite(start) || start >= total || end < start) {
+        return null
+    }
+    return { start, end: Math.min(end, total - 1) }
+}
+
+/** 跳过前缀并截断到指定长度；客户端读完后取消上游，缓存分支继续填充 */
+function sliceStream(body: ReadableStream<Uint8Array> | null, start: number, length: number): ReadableStream<Uint8Array> | null {
+    if (!body) {
+        return null
+    }
+    let skipped = 0
+    let sent = 0
+    return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+            let offset = 0
+            if (skipped < start) {
+                const need = start - skipped
+                if (chunk.byteLength <= need) {
+                    skipped += chunk.byteLength
+                    return
+                }
+                offset = need
+                skipped = start
+            }
+            const part = chunk.subarray(offset, offset + (length - sent))
+            sent += part.byteLength
+            controller.enqueue(part)
+            if (sent >= length) {
+                controller.terminate()
+            }
+        },
+    }))
+}
+
+function sliceResponse(res: Response, range: ByteRange, total: number): Response {
+    const headers = new Headers(res.headers)
+    headers.set('content-range', `bytes ${range.start}-${range.end}/${total}`)
+    headers.set('content-length', String(range.end - range.start + 1))
+    headers.set('accept-ranges', 'bytes')
+    return new Response(sliceStream(res.body, range.start, range.end - range.start + 1), {
+        status: 206,
+        statusText: res.statusText,
+        headers,
+    })
+}
+
+/**
+ * Range 未命中缓存：对可缓存对象改为拉全量、本地切片，同时填充缓存，
+ * 这样后续 Range/全量下载都能命中；对象超过缓存上限或 Range 不合法时退回透传。
+ */
+async function serveRangeFromOrigin(
+    reqInit: RequestInit,
+    urlObj: URL,
+    cfg: Config,
+    cache: Cache,
+    policy: CachePolicy,
+    ctx: ExecutionContext,
+    rangeHeader: string,
+): Promise<Response> {
+    const headers = new Headers(reqInit.headers)
+    headers.delete('range')
+    headers.delete('if-none-match')
+    headers.delete('if-modified-since')
+    const full = await proxy(urlObj, {
+        method: 'GET',
+        headers,
+        redirect: 'manual',
+        signal: reqInit.signal,
+    }, cfg)
+    const total = Number(full.headers.get('content-length') || '0')
+    const range = full.status === 200 && total > 0 && total <= CACHE_MAX_BYTES
+        ? parseByteRange(rangeHeader, total)
+        : null
+    if (!range) {
+        await full.body?.cancel()
+        return proxy(urlObj, reqInit, cfg)
+    }
+    const cloned = full.clone()
+    const stored = new Response(cloned.body, cloned)
+    stored.headers.set('cache-control', `public, max-age=${policy.ttl}${policy.immutable ? ', immutable' : ''}`)
+    ctx.waitUntil(cache.put(new Request(urlObj.href, { method: 'GET' }), stored).catch(() => { }))
+    return sliceResponse(full, range, total)
+}
+
+function cacheKeyRequest(urlObj: URL, req: Request): Request {    const headers = new Headers()
     for (const name of ['if-none-match', 'if-modified-since']) {
         const value = req.headers.get(name)
         if (value) {

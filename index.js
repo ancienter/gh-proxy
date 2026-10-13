@@ -78,6 +78,14 @@ function normalizeAssetUrl(url) {
 }
 
 /**
+ * @param {string} base
+ * @param {string} path
+ */
+function joinAssetUrl(base, path) {
+    return base + path.replace(/^\/+/, '')
+}
+
+/**
  * @param {Record<string, any>} env
  */
 function getConfig(env) {
@@ -160,16 +168,28 @@ async function fetchHandler(req, cfg) {
  */
 function serveAsset(req, path, cfg) {
     if (cfg.assetUrl) {
-        return fetch(cfg.assetUrl + path)
+        return fetch(joinAssetUrl(cfg.assetUrl, path))
     }
     if (cfg.assets) {
         // 资源绑定按完整路径匹配，需去掉 PREFIX 后再查询
         const assetUrl = new URL(req.url)
         const rest = assetUrl.pathname.slice(cfg.prefix.length)
         assetUrl.pathname = rest === '' ? '/' : '/' + rest
-        return cfg.assets.fetch(assetUrl)
+        // 转发条件请求与压缩相关头，其余（host、cookie 等）对静态资源无意义
+        const headers = new Headers()
+        for (const name of ['accept-encoding', 'if-modified-since', 'if-none-match', 'range']) {
+            const value = req.headers.get(name)
+            if (value) {
+                headers.set(name, value)
+            }
+        }
+        // 静态资源只支持 GET/HEAD
+        return cfg.assets.fetch(new Request(assetUrl, {
+            method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+            headers,
+        }))
     }
-    return fetch(DEFAULT_ASSET_URL + path)
+    return fetch(joinAssetUrl(DEFAULT_ASSET_URL, path))
 }
 
 

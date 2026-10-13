@@ -78,7 +78,7 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 - `JSDELIVR`：分支文件使用 jsDelivr 镜像的开关，`"1"` 开启，`"0"` 关闭
 - `WHITE_LIST`：白名单，逗号分隔，路径中包含任一字符才通过，留空表示不限制
 
-本地开发：`npm install && npm run dev`。
+本地开发：`npm install && npm run dev`。测试：`npm test`（纯 mock，不联网）。
 
 ## Python版本部署
 

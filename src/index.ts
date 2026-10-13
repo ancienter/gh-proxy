@@ -178,7 +178,11 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
     const urlObj = new URL(req.url)
 
     if (urlObj.pathname === HEALTHZ_PATH) {
-        return new Response(JSON.stringify({ status: 'ok', time: new Date().toISOString() }), {
+        return new Response(JSON.stringify({
+            status: 'ok',
+            limiter: typeof cfg.limiter?.limit === 'function',
+            time: new Date().toISOString(),
+        }), {
             status: 200,
             headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
         })

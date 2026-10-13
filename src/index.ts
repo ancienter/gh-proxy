@@ -151,26 +151,8 @@ async function checkRateLimit(req: Request, cfg: Config): Promise<Response | nul
     }
     return new Response('too many requests', {
         status: 429,
-        headers: { 'retry-after': '60', 'access-control-allow-origin': '*' },
+        headers: { 'retry-after': '60', 'access-control-allow-origin': '*', 'cache-control': 'no-store' },
     })
-}
-
-/** 限制写入缓存的字节数，超限时中止缓存分支（客户端分支不受影响） */
-function limitStream(body: ReadableStream<Uint8Array> | null, limit: number): ReadableStream<Uint8Array> | null {
-    if (!body) {
-        return null
-    }
-    let seen = 0
-    return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, controller) {
-            seen += chunk.byteLength
-            if (seen > limit) {
-                controller.error(new Error('cache body exceeds limit'))
-                return
-            }
-            controller.enqueue(chunk)
-        },
-    }))
 }
 
 export default {
@@ -351,8 +333,10 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
     const res = await proxy(urlObj, reqInit, cfg)
 
     if (cacheable && policy && req.method === 'GET' && res.status === 200 && isStorable(res)) {
+        // 缓存副本必须保留原始 response（含 content-length），
+        // 包一层流会丢掉 content-length，导致缓存命中时 Range/HEAD 头部缺失
         const cloned = res.clone()
-        const stored = new Response(limitStream(cloned.body, CACHE_MAX_BYTES), cloned)
+        const stored = new Response(cloned.body, cloned)
         stored.headers.set('cache-control', `public, max-age=${policy.ttl}${policy.immutable ? ', immutable' : ''}`)
         ctx.waitUntil(cache.put(new Request(urlObj.href, { method: 'GET' }), stored).catch(() => { }))
     }
@@ -396,6 +380,8 @@ function headResponse(res: Response): Response {
 }
 
 function isStorable(res: Response): boolean {
+    // 没有 content-length 的响应（codeload 动态生成的 tag archive 是 chunked）也允许入缓存；
+    // 超出平台缓存上限时由 cache.put 自行拒绝，调用处已 catch
     const length = Number(res.headers.get('content-length') || '0')
     return (!length || length <= CACHE_MAX_BYTES) && res.headers.get('vary') !== '*'
 }

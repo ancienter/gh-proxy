@@ -358,7 +358,7 @@ describe('cache', () => {
         expect(await head.text()).toBe('')
     })
 
-    it('serves a cold range from a full fetch and fills the cache', async () => {
+    it('serves a cold open-ended range from a full fetch and fills the cache', async () => {
         const upstream = 'https://github.com/cachetest/range/releases/download/v1/file.bin'
         const viaProxy = 'https://example.com/https://github.com/cachetest/range/releases/download/v1/file.bin'
         const upstreamRanges: string[] = []
@@ -373,17 +373,88 @@ describe('cache', () => {
             })
         }
 
-        const ranged = await call(viaProxy, { headers: { range: 'bytes=2-5' } })
+        const ranged = await call(viaProxy, { headers: { range: 'bytes=2-' } })
         expect(ranged.status).toBe(206)
-        expect(ranged.headers.get('content-range')).toBe('bytes 2-5/10')
-        expect(ranged.headers.get('content-length')).toBe('4')
-        expect(await ranged.text()).toBe('2345')
+        expect(ranged.headers.get('content-range')).toBe('bytes 2-9/10')
+        expect(ranged.headers.get('content-length')).toBe('8')
+        expect(await ranged.text()).toBe('23456789')
         expect(upstreamRanges).toEqual(['full'])
 
         const full = await call(viaProxy)
         expect(full.headers.get('x-proxy-cache')).toBe('HIT')
         expect(await full.text()).toBe('0123456789')
         expect(upstreamRanges).toEqual(['full'])
+    })
+
+    it('forwards bounded ranges without fetching the whole object', async () => {
+        const upstream = 'https://github.com/cachetest/bounded/releases/download/v1/file.bin'
+        const viaProxy = 'https://example.com/https://github.com/cachetest/bounded/releases/download/v1/file.bin'
+        const upstreamRanges: string[] = []
+        responder = (call) => {
+            if (call.url.href !== upstream) {
+                return null
+            }
+            upstreamRanges.push(call.headers?.get('range') || 'full')
+            return new Response('0123', {
+                status: 206,
+                headers: { 'content-length': '4', 'content-range': 'bytes 0-3/300000000', 'accept-ranges': 'bytes' },
+            })
+        }
+
+        const res = await call(viaProxy, { headers: { range: 'bytes=0-1023' } })
+        expect(res.status).toBe(206)
+        expect(res.headers.get('content-range')).toBe('bytes 0-3/300000000')
+        expect(await res.text()).toBe('0123')
+        expect(upstreamRanges).toEqual(['bytes=0-1023'])
+    })
+
+    it('skips slice filling for conditional requests', async () => {
+        const upstream = 'https://github.com/cachetest/conditional/releases/download/v1/file.bin'
+        const viaProxy = 'https://example.com/https://github.com/cachetest/conditional/releases/download/v1/file.bin'
+        const upstreamRanges: string[] = []
+        responder = (call) => {
+            if (call.url.href !== upstream) {
+                return null
+            }
+            upstreamRanges.push(call.headers?.get('range') || 'full')
+            return new Response('ab', {
+                status: 206,
+                headers: { 'content-length': '2', 'content-range': 'bytes 0-1/10', 'accept-ranges': 'bytes' },
+            })
+        }
+
+        const res = await call(viaProxy, {
+            headers: { range: 'bytes=0-', 'if-none-match': '"v1"' },
+        })
+        expect(res.status).toBe(206)
+        expect(upstreamRanges).toEqual(['bytes=0-'])
+    })
+
+    it('falls back when the upstream response is content-encoded', async () => {
+        const upstream = 'https://github.com/cachetest/encoded/releases/download/v1/file.txt'
+        const viaProxy = 'https://example.com/https://github.com/cachetest/encoded/releases/download/v1/file.txt'
+        const upstreamRanges: string[] = []
+        responder = (call) => {
+            if (call.url.href !== upstream) {
+                return null
+            }
+            const range = call.headers?.get('range')
+            upstreamRanges.push(range || 'full')
+            if (range) {
+                return new Response('zip', {
+                    status: 206,
+                    headers: { 'content-length': '3', 'content-range': 'bytes 0-2/100', 'accept-ranges': 'bytes' },
+                })
+            }
+            return new Response('encoded', {
+                status: 200,
+                headers: { 'content-length': '100', 'content-encoding': 'gzip', 'accept-ranges': 'bytes' },
+            })
+        }
+
+        const res = await call(viaProxy, { headers: { range: 'bytes=0-' } })
+        expect(res.status).toBe(206)
+        expect(upstreamRanges).toEqual(['full', 'bytes=0-'])
     })
 
     it('falls back to forwarding Range for objects above the cache limit', async () => {
@@ -405,7 +476,7 @@ describe('cache', () => {
             })
         }
 
-        const res = await call(viaProxy, { headers: { range: 'bytes=0-1' } })
+        const res = await call(viaProxy, { headers: { range: 'bytes=0-' } })
         expect(res.status).toBe(206)
         expect(res.headers.get('content-range')).toBe('bytes 0-1/500000000')
         expect(await res.text()).toBe('ab')

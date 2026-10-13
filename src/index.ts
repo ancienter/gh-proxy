@@ -22,6 +22,8 @@ const MAX_REDIRECTS = 5
 const CACHE_NAME = 'gh-proxy'
 // Cache API 单对象上限为 512MB，留出余量
 const CACHE_MAX_BYTES = 400 * 1024 * 1024
+// 开区间 Range（bytes=N-）只有起点靠前时才全量拉取填充，避免大对象带宽放大
+const SLICE_FILL_MAX_PREFIX = 8 * 1024 * 1024
 const IMMUTABLE_TTL = 31536000
 const ROLLING_TTL = 300
 const CACHE_STATUS_HEADER = 'x-proxy-cache'
@@ -331,8 +333,17 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
         signal: req.signal,
     }
     const rangeHeader = reqHdrRaw.get('range')
-    const res = cacheable && policy && req.method === 'GET' && rangeHeader
-        ? await serveRangeFromOrigin(reqInit, urlObj, cfg, cache, policy, ctx, rangeHeader)
+    // 只对"下载剩余部分"的开区间 Range 做拉全量切片填充；
+    // 条件请求由上游语义决定，不做切片
+    const openRange = cacheable && policy && req.method === 'GET' && rangeHeader
+        ? parseOpenRange(rangeHeader)
+        : null
+    const res = openRange &&
+        policy &&
+        openRange.start <= SLICE_FILL_MAX_PREFIX &&
+        !reqHdrRaw.has('if-none-match') &&
+        !reqHdrRaw.has('if-modified-since')
+        ? await serveOpenRangeFromOrigin(reqInit, urlObj, cfg, cache, policy, ctx, openRange.start)
         : await proxy(urlObj, reqInit, cfg)
 
     if (cacheable && policy && req.method === 'GET' && res.status === 200 && isStorable(res)) {
@@ -357,17 +368,14 @@ interface ByteRange {
     end: number
 }
 
-function parseByteRange(header: string, total: number): ByteRange | null {
-    const match = /^bytes=(\d+)-(\d*)$/.exec(header.trim())
+/** 仅接受开区间单段 Range：bytes=N- */
+function parseOpenRange(header: string): { start: number } | null {
+    const match = /^bytes=(\d+)-$/.exec(header.trim())
     if (!match) {
         return null
     }
     const start = Number(match[1])
-    const end = match[2] ? Number(match[2]) : total - 1
-    if (!Number.isFinite(start) || start >= total || end < start) {
-        return null
-    }
-    return { start, end: Math.min(end, total - 1) }
+    return Number.isFinite(start) ? { start } : null
 }
 
 /** 跳过前缀并截断到指定长度；客户端读完后取消上游，缓存分支继续填充 */
@@ -412,22 +420,21 @@ function sliceResponse(res: Response, range: ByteRange, total: number): Response
 }
 
 /**
- * Range 未命中缓存：对可缓存对象改为拉全量、本地切片，同时填充缓存，
- * 这样后续 Range/全量下载都能命中；对象超过缓存上限或 Range 不合法时退回透传。
+ * 冷缓存的开区间 Range（bytes=N-）：拉全量后在本地切片并填充缓存，
+ * 后续 Range/全量下载即可命中。对象超过缓存上限、无长度、带 content-encoding
+ * 或起点超出对象时退回透传 Range。
  */
-async function serveRangeFromOrigin(
+async function serveOpenRangeFromOrigin(
     reqInit: RequestInit,
     urlObj: URL,
     cfg: Config,
     cache: Cache,
     policy: CachePolicy,
     ctx: ExecutionContext,
-    rangeHeader: string,
+    start: number,
 ): Promise<Response> {
     const headers = new Headers(reqInit.headers)
     headers.delete('range')
-    headers.delete('if-none-match')
-    headers.delete('if-modified-since')
     const full = await proxy(urlObj, {
         method: 'GET',
         headers,
@@ -435,10 +442,11 @@ async function serveRangeFromOrigin(
         signal: reqInit.signal,
     }, cfg)
     const total = Number(full.headers.get('content-length') || '0')
-    const range = full.status === 200 && total > 0 && total <= CACHE_MAX_BYTES
-        ? parseByteRange(rangeHeader, total)
-        : null
-    if (!range) {
+    const usable = full.status === 200 &&
+        total > start &&
+        total <= CACHE_MAX_BYTES &&
+        !full.headers.get('content-encoding')
+    if (!usable) {
         await full.body?.cancel()
         return proxy(urlObj, reqInit, cfg)
     }
@@ -446,10 +454,11 @@ async function serveRangeFromOrigin(
     const stored = new Response(cloned.body, cloned)
     stored.headers.set('cache-control', `public, max-age=${policy.ttl}${policy.immutable ? ', immutable' : ''}`)
     ctx.waitUntil(cache.put(new Request(urlObj.href, { method: 'GET' }), stored).catch(() => { }))
-    return sliceResponse(full, range, total)
+    return sliceResponse(full, { start, end: total - 1 }, total)
 }
 
-function cacheKeyRequest(urlObj: URL, req: Request): Request {    const headers = new Headers()
+function cacheKeyRequest(urlObj: URL, req: Request): Request {
+    const headers = new Headers()
     for (const name of ['if-none-match', 'if-modified-since']) {
         const value = req.headers.get(name)
         if (value) {

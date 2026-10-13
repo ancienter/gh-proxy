@@ -2,7 +2,8 @@
  * Cloudflare Workers ES-module version
  *
  * Config via environment variables (wrangler.toml [vars], dashboard, or .dev.vars):
- *   ASSET_URL  static assets (homepage) url
+ *   ASSET_URL  optional external homepage url; empty uses the bundled "public/"
+ *              assets, falling back to DEFAULT_ASSET_URL when no assets binding
  *   PREFIX     path prefix, e.g. '/gh/' when routed as example.com/gh/*
  *   JSDELIVR   '1' to use jsDelivr mirror for blob/raw branch files, '0' off
  *   WHITE_LIST comma separated path fragments; empty means allow all
@@ -10,6 +11,8 @@
 
 const DEFAULT_ASSET_URL = 'https://hunshcn.github.io/gh-proxy/'
 const DEFAULT_PREFIX = '/'
+// 跟随上游跳转的最大次数，超出后把跳转原样交回客户端
+const MAX_REDIRECTS = 5
 
 /** @type {ResponseInit} */
 const PREFLIGHT_INIT = {
@@ -41,10 +44,11 @@ function makeRes(body, status = 200, headers = {}) {
 
 /**
  * @param {string} urlStr
+ * @param {string | URL} [base]
  */
-function newUrl(urlStr) {
+function newUrl(urlStr, base) {
     try {
-        return new URL(urlStr)
+        return new URL(urlStr, base)
     } catch (err) {
         return null
     }
@@ -64,22 +68,33 @@ function normalizePrefix(prefix) {
 }
 
 /**
- * @param {Record<string, string>} env
+ * @param {string} url
+ */
+function normalizeAssetUrl(url) {
+    if (!url || url.endsWith('/')) {
+        return url
+    }
+    return url + '/'
+}
+
+/**
+ * @param {Record<string, any>} env
  */
 function getConfig(env) {
     const jsdelivr = String(env.JSDELIVR || '0').toLowerCase()
     return {
-        assetUrl: env.ASSET_URL || DEFAULT_ASSET_URL,
+        assetUrl: normalizeAssetUrl(env.ASSET_URL || ''),
         prefix: normalizePrefix(env.PREFIX || DEFAULT_PREFIX),
         jsdelivr: jsdelivr === '1' || jsdelivr === 'true',
         whiteList: String(env.WHITE_LIST || '').split(',').map(s => s.trim()).filter(Boolean),
+        assets: env.ASSETS || null,
     }
 }
 
 export default {
     /**
      * @param {Request} request
-     * @param {Record<string, string>} env
+     * @param {Record<string, any>} env
      * @param {ExecutionContext} ctx
      */
     async fetch(request, env, ctx) {
@@ -108,6 +123,9 @@ async function fetchHandler(req, cfg) {
     if (path) {
         return Response.redirect('https://' + urlObj.host + cfg.prefix + path, 301)
     }
+    if (!urlObj.pathname.startsWith(cfg.prefix)) {
+        return new Response('not found', { status: 404 })
+    }
     // cfworker 会把路径中的 `//` 合并成 `/`
     path = urlObj.href.slice(urlObj.origin.length + cfg.prefix.length).replace(/^https?:\/+/, 'https://')
     if (path.search(exp1) === 0 || path.search(exp5) === 0 || path.search(exp6) === 0 || path.search(exp3) === 0) {
@@ -129,8 +147,25 @@ async function fetchHandler(req, cfg) {
             return httpHandler(req, path, cfg)
         }
     } else {
+        return serveAsset(req, path, cfg)
+    }
+}
+
+/**
+ * 未知路径回退到主页静态资源
+ *
+ * @param {Request} req
+ * @param {string} path
+ * @param {ReturnType<typeof getConfig>} cfg
+ */
+function serveAsset(req, path, cfg) {
+    if (cfg.assetUrl) {
         return fetch(cfg.assetUrl + path)
     }
+    if (cfg.assets) {
+        return cfg.assets.fetch(req)
+    }
+    return fetch(DEFAULT_ASSET_URL + path)
 }
 
 
@@ -172,43 +207,79 @@ function httpHandler(req, pathname, cfg) {
         method: req.method,
         headers: reqHdrNew,
         redirect: 'manual',
-        body: req.body
+        body: req.body,
+        // 客户端断开时同步中止上游请求
+        signal: req.signal,
     }
     return proxy(urlObj, reqInit, cfg)
 }
 
 
 /**
+ * @param {Response} res
+ * @param {Headers} headers
+ */
+function proxyRes(res, headers) {
+    headers.set('access-control-expose-headers', '*')
+    headers.set('access-control-allow-origin', '*')
+
+    headers.delete('content-security-policy')
+    headers.delete('content-security-policy-report-only')
+    headers.delete('clear-site-data')
+
+    return new Response(res.body, {
+        status: res.status,
+        headers,
+    })
+}
+
+
+/**
+ * 请求上游，最多跟随 MAX_REDIRECTS 次跳转；
+ * 命中代理范围的 location 改写前缀后交回客户端。
  *
  * @param {URL} urlObj
  * @param {RequestInit} reqInit
  * @param {ReturnType<typeof getConfig>} cfg
  */
 async function proxy(urlObj, reqInit, cfg) {
-    const res = await fetch(urlObj.href, reqInit)
-    const resHdrOld = res.headers
-    const resHdrNew = new Headers(resHdrOld)
+    let currentUrl = urlObj
+    let res = await fetch(currentUrl.href, reqInit)
 
-    const status = res.status
-
-    if (resHdrNew.has('location')) {
-        let _location = resHdrNew.get('location')
-        if (checkUrl(_location))
-            resHdrNew.set('location', cfg.prefix + _location)
-        else {
-            reqInit.redirect = 'follow'
-            return proxy(newUrl(_location), reqInit, cfg)
+    for (let i = 0; i < MAX_REDIRECTS; i++) {
+        const location = res.headers.get('location')
+        if (res.status < 300 || res.status >= 400 || !location) {
+            break
         }
+        if (checkUrl(location)) {
+            const headers = new Headers(res.headers)
+            headers.set('location', cfg.prefix + location)
+            return proxyRes(res, headers)
+        }
+        const nextUrl = newUrl(location, currentUrl)
+        if (!nextUrl) {
+            break
+        }
+        let method = reqInit.method || 'GET'
+        if (method !== 'GET' && method !== 'HEAD') {
+            if (res.status === 303) {
+                method = 'GET'
+            } else if ((res.status === 301 || res.status === 302) && method === 'POST') {
+                method = 'GET'
+            } else {
+                // 307/308 等需要重放请求体，而 body 已随上一个请求消费，交回客户端处理
+                break
+            }
+        }
+        currentUrl = nextUrl
+        reqInit = {
+            method,
+            headers: reqInit.headers,
+            redirect: 'manual',
+            signal: reqInit.signal,
+        }
+        res = await fetch(currentUrl.href, reqInit)
     }
-    resHdrNew.set('access-control-expose-headers', '*')
-    resHdrNew.set('access-control-allow-origin', '*')
 
-    resHdrNew.delete('content-security-policy')
-    resHdrNew.delete('content-security-policy-report-only')
-    resHdrNew.delete('clear-site-data')
-
-    return new Response(res.body, {
-        status,
-        headers: resHdrNew,
-    })
+    return proxyRes(res, new Headers(res.headers))
 }

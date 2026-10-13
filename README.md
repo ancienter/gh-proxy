@@ -48,7 +48,7 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 
 ## cf worker版本部署
 
-本项目是标准的 Cloudflare Workers 项目，包含 `wrangler.toml`、`package.json`，入口为 ES module 语法的 `index.js`。
+本项目是标准的 Cloudflare Workers 项目，包含 `wrangler.toml`、`package.json`，入口为 ES module 语法的 `index.js`。主页静态文件内置在 `public/`，通过 Workers Static Assets 提供，不依赖外部站点。
 
 ### Git 仓库自动部署（推荐）
 
@@ -65,7 +65,7 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 
 2. 注册，登陆，`Start building`，取一个子域名，`Create a Worker`。
 
-3. 复制 [index.js](https://cdn.jsdelivr.net/gh/ancienter/gh-proxy@master/index.js) 到左侧代码框，`Save and deploy`。如果正常，右侧应显示首页。代码不配置任何变量也能跑，读取默认值；如需自定义，见下方配置说明。
+3. 复制 [index.js](https://cdn.jsdelivr.net/gh/ancienter/gh-proxy@master/index.js) 到左侧代码框，`Save and deploy`。如果正常，右侧应显示首页。此处没有静态资源绑定，主页回退到上游地址；配置 `ASSET_URL` 可指向自己的页面。
 
 4. 有 Node.js 环境也可以在本地执行 `npm install && npm run deploy`。
 
@@ -73,8 +73,8 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 
 配置项写在 `wrangler.toml` 的 `[vars]` 中（也可在 Dashboard 的 Worker 设置里修改），本地开发可放在 `.dev.vars`：
 
-- `ASSET_URL`：静态资源的 url（实际上就是现在显示出来的那个输入框单页面）
-- `PREFIX`：前缀，默认（根路径情况为"/"），如果自定义路由为 example.com/gh/*，请将 PREFIX 改为 '/gh/'
+- `ASSET_URL`：主页地址。留空（默认）使用内置 `public/` 资源；填写外部地址则回源该地址，例如 `https://hunshcn.github.io/gh-proxy/`
+- `PREFIX`：前缀，默认（根路径情况为"/"），如果自定义路由为 example.com/gh/*，请将 PREFIX 改为 '/gh/'。请求路径不匹配前缀时返回 404
 - `JSDELIVR`：分支文件使用 jsDelivr 镜像的开关，`"1"` 开启，`"0"` 关闭
 - `WHITE_LIST`：白名单，逗号分隔，路径中包含任一字符才通过，留空表示不限制
 

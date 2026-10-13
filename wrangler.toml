@@ -11,9 +11,15 @@ workers_dev = true
 pattern = "gh-proxy.7s.pub"
 custom_domain = true
 
+# 内置主页静态资源（public/），未命中资源的请求交给 Worker 处理
+[assets]
+directory = "public"
+binding = "ASSETS"
+run_worker_first = ["/*"]
+
 [vars]
-# 静态资源（主页）地址
-ASSET_URL = "https://hunshcn.github.io/gh-proxy/"
+# 主页地址，留空使用内置 public/ 资源；填外部地址则回源该地址
+ASSET_URL = ""
 # 前缀，如果自定义路由为 example.com/gh/*，将 PREFIX 改为 '/gh/'
 PREFIX = "/"
 # 分支文件使用 jsDelivr 镜像的开关，0 为关闭

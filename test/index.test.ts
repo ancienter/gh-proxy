@@ -63,8 +63,9 @@ const baseEnv = (overrides: Record<string, unknown> = {}): Env => ({
     PREFIX: '/',
     JSDELIVR: '0',
     WHITE_LIST: '',
+    RATE_LIMITER: { limit: async () => ({ success: true }) },
     ...overrides,
-} as Env)
+} as unknown as Env)
 
 const call = async (url: string, init?: RequestInit, overrides?: Record<string, unknown>): Promise<Response> => {
     const ctx = createExecutionContext()
@@ -265,5 +266,144 @@ describe('homepage', () => {
 
         const res = await call('https://example.com/whatever', undefined, { ASSETS: undefined })
         expect(await res.text()).toBe('upstream-page')
+    })
+})
+
+describe('upstream allowlist', () => {
+    it('rejects hosts outside GitHub', async () => {
+        const res = await call('https://example.com/https://example.com/x')
+        expect(res.status).toBe(403)
+        expect(calls).toHaveLength(0)
+    })
+
+    it('rejects plain http upstreams', async () => {
+        const res = await call('https://example.com/http://github.com/a/b/archive/x.zip')
+        expect(res.status).toBe(403)
+        expect(calls).toHaveLength(0)
+    })
+
+    it('does not follow redirects to hosts outside the allowlist', async () => {
+        responder = route('GET', 'https://github.com/a/b/releases/download/v1/x.bin', () =>
+            text('', 302, { location: 'https://example.com/evil' }))
+
+        const res = await call('https://example.com/https://github.com/a/b/releases/download/v1/x.bin')
+        expect(res.status).toBe(302)
+        expect(res.headers.get('location')).toBe('https://example.com/evil')
+        expect(calls).toHaveLength(1)
+    })
+
+    it('proxies api.github.com without caching', async () => {
+        responder = route('GET', 'https://api.github.com/repos/a/b/releases/latest', () => text('{"tag_name":"v1"}'))
+
+        const res = await call('https://example.com/https://api.github.com/repos/a/b/releases/latest')
+        expect(res.status).toBe(200)
+        expect(await res.text()).toBe('{"tag_name":"v1"}')
+        expect(res.headers.get('x-proxy-cache')).toBe('BYPASS')
+    })
+})
+
+describe('cache', () => {
+    const upstream = 'https://github.com/cachetest/repo/releases/download/v1.0.0/file.bin'
+    const viaProxy = 'https://example.com/https://github.com/cachetest/repo/releases/download/v1.0.0/file.bin'
+
+    it('caches immutable assets and serves conditional, range and HEAD requests from cache', async () => {
+        let upstreamCalls = 0
+        responder = route('GET', upstream, () => {
+            upstreamCalls++
+            return new Response('0123456789', {
+                status: 200,
+                headers: {
+                    'content-length': '10',
+                    'etag': '"v1"',
+                    'last-modified': 'Wed, 01 Jan 2025 00:00:00 GMT',
+                    'accept-ranges': 'bytes',
+                },
+            })
+        })
+
+        const first = await call(viaProxy)
+        expect(first.headers.get('x-proxy-cache')).toBe('MISS')
+        expect(await first.text()).toBe('0123456789')
+
+        const second = await call(viaProxy)
+        expect(second.headers.get('x-proxy-cache')).toBe('HIT')
+        expect(await second.text()).toBe('0123456789')
+        expect(upstreamCalls).toBe(1)
+
+        const conditional = await call(viaProxy, { headers: { 'if-none-match': '"v1"' } })
+        expect(conditional.status).toBe(304)
+        expect(conditional.headers.get('x-proxy-cache')).toBe('HIT')
+
+        const ranged = await call(viaProxy, { headers: { range: 'bytes=2-5' } })
+        expect(ranged.status).toBe(206)
+        expect(ranged.headers.get('content-range')).toBe('bytes 2-5/10')
+        expect(await ranged.text()).toBe('2345')
+
+        const head = await call(viaProxy, { method: 'HEAD' })
+        expect(head.status).toBe(200)
+        expect(head.headers.get('content-length')).toBe('10')
+        expect(await head.text()).toBe('')
+    })
+
+    it('revalidates rolling assets with a short TTL', async () => {
+        const dbUpstream = 'https://github.com/cachetest/geo/releases/download/v2/geoip.db'
+        const dbViaProxy = 'https://example.com/https://github.com/cachetest/geo/releases/download/v2/geoip.db'
+        responder = route('GET', dbUpstream, () =>
+            new Response('db', { status: 200, headers: { 'content-length': '2', 'etag': '"db1"' } }))
+
+        const first = await call(dbViaProxy)
+        expect(first.headers.get('x-proxy-cache')).toBe('MISS')
+
+        const conditional = await call(dbViaProxy, { headers: { 'if-none-match': '"db1"' } })
+        expect(conditional.status).toBe(304)
+        expect(conditional.headers.get('x-proxy-cache')).toBe('HIT')
+    })
+
+    it('does not cache error responses', async () => {
+        const upstream404 = 'https://github.com/cachetest/missing/releases/download/v1/none.zip'
+        const viaProxy404 = 'https://example.com/https://github.com/cachetest/missing/releases/download/v1/none.zip'
+        let upstreamCalls = 0
+        responder = route('GET', upstream404, () => {
+            upstreamCalls++
+            return text('missing', 404)
+        })
+
+        expect((await call(viaProxy404)).status).toBe(404)
+        expect((await call(viaProxy404)).status).toBe(404)
+        expect(upstreamCalls).toBe(2)
+    })
+
+    it('bypasses the cache for authorized requests', async () => {
+        const authUpstream = 'https://github.com/cachetest/private/releases/download/v1/secret.bin'
+        const authViaProxy = 'https://example.com/https://github.com/cachetest/private/releases/download/v1/secret.bin'
+        responder = route('GET', authUpstream, () => text('secret'))
+
+        const authorized = await call(authViaProxy, { headers: { authorization: 'Bearer token' } })
+        expect(authorized.headers.get('x-proxy-cache')).toBe('BYPASS')
+        expect(await authorized.text()).toBe('secret')
+
+        const anonymous = await call(authViaProxy)
+        expect(anonymous.headers.get('x-proxy-cache')).toBe('MISS')
+    })
+})
+
+describe('abuse protection', () => {
+    it('returns 429 when the rate limiter rejects', async () => {
+        const res = await call('https://example.com/https://github.com/a/b/archive/x.zip', undefined, {
+            RATE_LIMITER: { limit: async () => ({ success: false }) },
+        })
+        expect(res.status).toBe(429)
+        expect(res.headers.get('retry-after')).toBe('60')
+        expect(calls).toHaveLength(0)
+    })
+})
+
+describe('health', () => {
+    it('answers /healthz without touching upstreams', async () => {
+        const res = await call('https://example.com/healthz')
+        expect(res.status).toBe(200)
+        expect(res.headers.get('content-type')).toContain('application/json')
+        expect(JSON.parse(await res.text()).status).toBe('ok')
+        expect(calls).toHaveLength(0)
     })
 })

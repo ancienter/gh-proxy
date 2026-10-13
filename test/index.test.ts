@@ -282,6 +282,12 @@ describe('upstream allowlist', () => {
         expect(calls).toHaveLength(0)
     })
 
+    it('rejects plain http upstreams after the edge collapses double slashes', async () => {
+        const res = await call('https://example.com/http:/github.com/a/b/archive/x.zip')
+        expect(res.status).toBe(403)
+        expect(calls).toHaveLength(0)
+    })
+
     it('does not follow redirects to hosts outside the allowlist', async () => {
         responder = route('GET', 'https://github.com/a/b/releases/download/v1/x.bin', () =>
             text('', 302, { location: 'https://example.com/evil' }))

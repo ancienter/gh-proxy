@@ -197,7 +197,12 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
         return new Response('not found', { status: 404 })
     }
     // cfworker 会把路径中的 `//` 合并成 `/`
-    path = urlObj.href.slice(urlObj.origin.length + cfg.prefix.length).replace(/^https?:\/+/, 'https://')
+    path = urlObj.href.slice(urlObj.origin.length + cfg.prefix.length)
+    // 显式 http:// 目标直接拒绝（合并后可能是 http:/）
+    if (/^http:\/{1,2}/i.test(path)) {
+        return new Response('forbidden scheme', { status: 403 })
+    }
+    path = path.replace(/^https?:\/+/, 'https://')
 
     // 绝对地址目标先过白名单，禁止 http:// 与外部域名
     if (/^https?:\/\//i.test(path)) {

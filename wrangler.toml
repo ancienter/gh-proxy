@@ -6,6 +6,11 @@ main = "index.js"
 compatibility_date = "2026-10-13"
 workers_dev = true
 
+# 自定义域名，zone 必须在同一账号下
+[[routes]]
+pattern = "gh-proxy.7s.pub"
+custom_domain = true
+
 [vars]
 # 静态资源（主页）地址
 ASSET_URL = "https://hunshcn.github.io/gh-proxy/"

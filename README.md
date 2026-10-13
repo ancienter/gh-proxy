@@ -53,7 +53,7 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 ### Git 仓库自动部署（推荐）
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)，进入 `Workers & Pages`，点击 `Create`，选择 `Import a repository`（首次需要授权 GitHub 账号）。
-2. 选择本仓库和部署分支（默认 `main`）。
+2. 选择本仓库和部署分支（本仓库为 `master`）。
 3. Build command 留空，Deploy command 保持默认的 `npx wrangler deploy`，点击 `Deploy`。
 4. 之后每次 push 到该分支都会自动构建部署。Wrangler 版本取自 `package.json`。
 
@@ -65,7 +65,7 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 
 2. 注册，登陆，`Start building`，取一个子域名，`Create a Worker`。
 
-3. 复制 [index.js](https://cdn.jsdelivr.net/gh/hunshcn/gh-proxy@master/index.js) 到左侧代码框，`Save and deploy`。如果正常，右侧应显示首页。
+3. 复制 [index.js](https://cdn.jsdelivr.net/gh/ancienter/gh-proxy@master/index.js) 到左侧代码框，`Save and deploy`。如果正常，右侧应显示首页。代码不配置任何变量也能跑，读取默认值；如需自定义，见下方配置说明。
 
 4. 有 Node.js 环境也可以在本地执行 `npm install && npm run deploy`。
 

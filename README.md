@@ -48,7 +48,7 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 
 ## cf worker版本部署
 
-本项目是标准的 Cloudflare Workers 项目，包含 `wrangler.toml`、`package.json`，入口为 ES module 语法的 `index.js`。主页静态文件内置在 `public/`，通过 Workers Static Assets 提供，不依赖外部站点。
+本项目是标准的 Cloudflare Workers 项目（TypeScript + Wrangler），入口为 `src/index.ts`，构建配置为 `wrangler.jsonc`。主页静态文件内置在 `public/`，通过 Workers Static Assets 提供，不依赖外部站点。
 
 ### Git 仓库自动部署（推荐）
 
@@ -61,24 +61,32 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 
 ### 手动部署
 
-1. 首页：https://workers.cloudflare.com
+有 Node.js 环境时本地执行：
 
-2. 注册，登陆，`Start building`，取一个子域名，`Create a Worker`。
+```
+npm install
+npm run deploy
+```
 
-3. 复制 [index.js](https://cdn.jsdelivr.net/gh/ancienter/gh-proxy@master/index.js) 到左侧代码框，`Save and deploy`。如果正常，右侧应显示首页。此处没有静态资源绑定，主页回退到上游地址；配置 `ASSET_URL` 可指向自己的页面。
-
-4. 有 Node.js 环境也可以在本地执行 `npm install && npm run deploy`。
+入口是 TypeScript 且依赖内置静态资源，不再支持复制单文件到 Dashboard 在线编辑器。
 
 ### 配置
 
-配置项写在 `wrangler.toml` 的 `[vars]` 中（也可在 Dashboard 的 Worker 设置里修改），本地开发可放在 `.dev.vars`：
+配置项写在 `wrangler.jsonc` 的 `vars` 中（也可在 Dashboard 的 Worker 设置里修改），本地开发可放在 `.dev.vars`：
 
 - `ASSET_URL`：主页地址。留空（默认）使用内置 `public/` 资源；填写外部地址则回源该地址，例如 `https://hunshcn.github.io/gh-proxy/`
 - `PREFIX`：前缀，默认（根路径情况为"/"），如果自定义路由为 example.com/gh/*，请将 PREFIX 改为 '/gh/'。请求路径不匹配前缀时返回 404
 - `JSDELIVR`：分支文件使用 jsDelivr 镜像的开关，`"1"` 开启，`"0"` 关闭
 - `WHITE_LIST`：白名单，逗号分隔，路径中包含任一字符才通过，留空表示不限制
 
-本地开发：`npm install && npm run dev`。测试：`npm test`（纯 mock，不联网）。
+### 开发与测试
+
+- `npm run dev`：本地开发（需要能运行 workerd 的环境）
+- `npm test`：Vitest + `@cloudflare/vitest-plugin`，测试运行在真实 Workers 运行时里，出站请求全部 mock
+- `npm run typecheck`：TypeScript 类型检查
+- `npm run cf-typegen`：按 `wrangler.jsonc` 重新生成 `worker-configuration.d.ts`（绑定类型）
+
+CI（GitHub Actions）会执行 `typecheck` 与 `test`。
 
 ## Python版本部署
 

@@ -1,7 +1,7 @@
 /**
  * Cloudflare Workers ES-module version
  *
- * Config via environment variables (wrangler.toml [vars], dashboard, or .dev.vars):
+ * Config via environment variables (wrangler.jsonc vars, dashboard, or .dev.vars):
  *   ASSET_URL  optional external homepage url; empty uses the bundled "public/"
  *              assets, falling back to DEFAULT_ASSET_URL when no assets binding
  *   PREFIX     path prefix, e.g. '/gh/' when routed as example.com/gh/*
@@ -14,8 +14,16 @@ const DEFAULT_PREFIX = '/'
 // 跟随上游跳转的最大次数，超出后把跳转原样交回客户端
 const MAX_REDIRECTS = 5
 
+interface Config {
+    assetUrl: string
+    prefix: string
+    jsdelivr: boolean
+    whiteList: string[]
+    assets: Fetcher | null
+}
+
 /** @type {ResponseInit} */
-const PREFLIGHT_INIT = {
+const PREFLIGHT_INIT: ResponseInit = {
     status: 204,
     headers: new Headers({
         'access-control-allow-origin': '*',
@@ -31,22 +39,12 @@ const exp4 = /^(?:https?:\/\/)?raw\.(?:githubusercontent|github)\.com\/.+?\/.+?\
 const exp5 = /^(?:https?:\/\/)?gist\.(?:githubusercontent|github)\.com\/.+?\/.+?\/.+$/i
 const exp6 = /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/tags.*$/i
 
-/**
- * @param {any} body
- * @param {number} status
- * @param {Object<string, string>} headers
- */
-function makeRes(body, status = 200, headers = {}) {
+function makeRes(body: BodyInit | null, status = 200, headers: Record<string, string> = {}): Response {
     headers['access-control-allow-origin'] = '*'
     return new Response(body, { status, headers })
 }
 
-
-/**
- * @param {string} urlStr
- * @param {string | URL} [base]
- */
-function newUrl(urlStr, base) {
+function newUrl(urlStr: string, base?: string | URL): URL | null {
     try {
         return new URL(urlStr, base)
     } catch (err) {
@@ -54,10 +52,7 @@ function newUrl(urlStr, base) {
     }
 }
 
-/**
- * @param {string} prefix
- */
-function normalizePrefix(prefix) {
+function normalizePrefix(prefix: string): string {
     if (!prefix.startsWith('/')) {
         prefix = '/' + prefix
     }
@@ -67,28 +62,18 @@ function normalizePrefix(prefix) {
     return prefix
 }
 
-/**
- * @param {string} url
- */
-function normalizeAssetUrl(url) {
+function normalizeAssetUrl(url: string): string {
     if (!url || url.endsWith('/')) {
         return url
     }
     return url + '/'
 }
 
-/**
- * @param {string} base
- * @param {string} path
- */
-function joinAssetUrl(base, path) {
+function joinAssetUrl(base: string, path: string): string {
     return base + path.replace(/^\/+/, '')
 }
 
-/**
- * @param {Record<string, any>} env
- */
-function getConfig(env) {
+function getConfig(env: Env): Config {
     const jsdelivr = String(env.JSDELIVR || '0').toLowerCase()
     return {
         assetUrl: normalizeAssetUrl(env.ASSET_URL || ''),
@@ -100,18 +85,13 @@ function getConfig(env) {
 }
 
 export default {
-    /**
-     * @param {Request} request
-     * @param {Record<string, any>} env
-     * @param {ExecutionContext} ctx
-     */
-    async fetch(request, env, ctx) {
+    async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         return fetchHandler(request, getConfig(env))
-            .catch(err => makeRes('cfworker error:\n' + err.stack, 502))
+            .catch((err: unknown) => makeRes('cfworker error:\n' + (err as Error).stack, 502))
     }
 }
 
-function checkUrl(u) {
+function checkUrl(u: string): boolean {
     for (let i of [exp1, exp2, exp3, exp4, exp5, exp6]) {
         if (u.search(i) === 0) {
             return true
@@ -120,11 +100,7 @@ function checkUrl(u) {
     return false
 }
 
-/**
- * @param {Request} req
- * @param {ReturnType<typeof getConfig>} cfg
- */
-async function fetchHandler(req, cfg) {
+async function fetchHandler(req: Request, cfg: Config): Promise<Response> {
     const urlStr = req.url
     const urlObj = new URL(urlStr)
     let path = urlObj.searchParams.get('q')
@@ -161,12 +137,8 @@ async function fetchHandler(req, cfg) {
 
 /**
  * 未知路径回退到主页静态资源
- *
- * @param {Request} req
- * @param {string} path
- * @param {ReturnType<typeof getConfig>} cfg
  */
-function serveAsset(req, path, cfg) {
+function serveAsset(req: Request, path: string, cfg: Config): Promise<Response> {
     if (cfg.assetUrl) {
         return fetch(joinAssetUrl(cfg.assetUrl, path))
     }
@@ -192,13 +164,7 @@ function serveAsset(req, path, cfg) {
     return fetch(joinAssetUrl(DEFAULT_ASSET_URL, path))
 }
 
-
-/**
- * @param {Request} req
- * @param {string} pathname
- * @param {ReturnType<typeof getConfig>} cfg
- */
-function httpHandler(req, pathname, cfg) {
+async function httpHandler(req: Request, pathname: string, cfg: Config): Promise<Response> {
     const reqHdrRaw = req.headers
 
     // preflight
@@ -225,9 +191,12 @@ function httpHandler(req, pathname, cfg) {
         urlStr = 'https://' + urlStr
     }
     const urlObj = newUrl(urlStr)
+    if (!urlObj) {
+        return new Response('bad url', { status: 400 })
+    }
 
     /** @type {RequestInit} */
-    const reqInit = {
+    const reqInit: RequestInit = {
         method: req.method,
         headers: reqHdrNew,
         redirect: 'manual',
@@ -238,12 +207,7 @@ function httpHandler(req, pathname, cfg) {
     return proxy(urlObj, reqInit, cfg)
 }
 
-
-/**
- * @param {Response} res
- * @param {Headers} headers
- */
-function proxyRes(res, headers) {
+function proxyRes(res: Response, headers: Headers): Response {
     headers.set('access-control-expose-headers', '*')
     headers.set('access-control-allow-origin', '*')
 
@@ -257,16 +221,11 @@ function proxyRes(res, headers) {
     })
 }
 
-
 /**
  * 请求上游，最多跟随 MAX_REDIRECTS 次跳转；
  * 命中代理范围的 location 改写前缀后交回客户端。
- *
- * @param {URL} urlObj
- * @param {RequestInit} reqInit
- * @param {ReturnType<typeof getConfig>} cfg
  */
-async function proxy(urlObj, reqInit, cfg) {
+async function proxy(urlObj: URL, reqInit: RequestInit, cfg: Config): Promise<Response> {
     let currentUrl = urlObj
     let res = await fetch(currentUrl.href, reqInit)
 

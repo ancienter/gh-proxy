@@ -14,5 +14,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Check generated types are up to date
+        run: |
+          npm run cf-typegen
+          git diff --exit-code -- worker-configuration.d.ts
       - run: npm run typecheck
       - run: npm test
+      - name: Validate the Worker build
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-out"

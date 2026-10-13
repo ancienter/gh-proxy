@@ -80,6 +80,12 @@ describe('routing', () => {
         expect(res.headers.get('location')).toBe('https://example.com/github.com/a/b/archive/master.zip')
     })
 
+    it('redirects ?q= with a custom PREFIX', async () => {
+        const res = await call('https://example.com/gh/?q=github.com/a/b/archive/master.zip', undefined, { PREFIX: '/gh/' })
+        expect(res.status).toBe(301)
+        expect(res.headers.get('location')).toBe('https://example.com/gh/github.com/a/b/archive/master.zip')
+    })
+
     it('returns 404 for paths outside PREFIX', async () => {
         const res = await call('https://example.com/whatever', undefined, { PREFIX: '/gh/' })
         expect(res.status).toBe(404)
@@ -122,6 +128,15 @@ describe('proxying', () => {
         const raw = await call('https://example.com/raw.githubusercontent.com/a/b/master/f.js', undefined, { JSDELIVR: 'true' })
         expect(raw.status).toBe(302)
         expect(raw.headers.get('location')).toBe('https://cdn.jsdelivr.net/gh/a/b@master/f.js')
+    })
+
+    it('passes HEAD requests through to the origin', async () => {
+        responder = route('HEAD', 'https://github.com/a/b/archive/master.zip', () =>
+            new Response(null, { status: 200, headers: { 'content-type': 'application/zip' } }))
+
+        const res = await call('https://example.com/github.com/a/b/archive/master.zip', { method: 'HEAD' })
+        expect(res.status).toBe(200)
+        expect(calls[0].method).toBe('HEAD')
     })
 
     it('enforces WHITE_LIST', async () => {
@@ -220,6 +235,11 @@ describe('homepage', () => {
         expect(second.status).toBe(304)
     })
 
+    it('answers HEAD for bundled assets', async () => {
+        const res = await call('https://example.com/', { method: 'HEAD' })
+        expect(res.status).toBe(200)
+    })
+
     it('strips PREFIX before looking up bundled assets', async () => {
         const res = await call('https://example.com/gh/', undefined, { PREFIX: '/gh/' })
         expect(res.status).toBe(200)
@@ -246,8 +266,4 @@ describe('homepage', () => {
         const res = await call('https://example.com/whatever', undefined, { ASSETS: undefined })
         expect(await res.text()).toBe('upstream-page')
     })
-})
-
-afterEach(() => {
-    responder = () => null
 })

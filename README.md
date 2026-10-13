@@ -84,9 +84,9 @@ npm run deploy
 - `npm run dev`：本地开发（需要能运行 workerd 的环境）
 - `npm test`：Vitest + `@cloudflare/vitest-plugin`，测试运行在真实 Workers 运行时里，出站请求全部 mock
 - `npm run typecheck`：TypeScript 类型检查
-- `npm run cf-typegen`：按 `wrangler.jsonc` 重新生成 `worker-configuration.d.ts`（绑定类型）
+- `npm run cf-typegen`：按 `wrangler.jsonc` 重新生成 `worker-configuration.d.ts`（绑定类型）。使用 `--include-runtime false`，runtime 类型由 `@cloudflare/workers-types` 提供；升级 `compatibility_date` 时同步升级该依赖
 
-CI（GitHub Actions）会执行 `typecheck` 与 `test`。
+CI（GitHub Actions）执行类型生成一致性检查、`typecheck`、`test` 和 `wrangler deploy --dry-run`。
 
 ## Python版本部署
 

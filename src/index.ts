@@ -142,6 +142,8 @@ async function checkRateLimit(req: Request, cfg: Config): Promise<Response | nul
     if (!cfg.limiter || typeof cfg.limiter.limit !== 'function') {
         return null
     }
+    // Rate Limiting binding 是尽力而为的近似限流：计数器按机器本地缓存、异步同步，
+    // 突发流量可能被分散到多台机器而低于阈值；需要严格限流请用 WAF rate limiting rule。
     const key = req.headers.get('cf-connecting-ip') || 'unknown'
     const { success } = await cfg.limiter.limit({ key })
     if (success) {
@@ -151,6 +153,24 @@ async function checkRateLimit(req: Request, cfg: Config): Promise<Response | nul
         status: 429,
         headers: { 'retry-after': '60', 'access-control-allow-origin': '*' },
     })
+}
+
+/** 限制写入缓存的字节数，超限时中止缓存分支（客户端分支不受影响） */
+function limitStream(body: ReadableStream<Uint8Array> | null, limit: number): ReadableStream<Uint8Array> | null {
+    if (!body) {
+        return null
+    }
+    let seen = 0
+    return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+            seen += chunk.byteLength
+            if (seen > limit) {
+                controller.error(new Error('cache body exceeds limit'))
+                return
+            }
+            controller.enqueue(chunk)
+        },
+    }))
 }
 
 export default {
@@ -163,13 +183,17 @@ export default {
         } catch (err) {
             res = makeRes('cfworker error:\n' + (err as Error).stack, 502)
         }
-        console.log(JSON.stringify({
-            path: new URL(request.url).pathname.slice(0, 256),
-            method: request.method,
-            status: res.status,
-            ms: Date.now() - start,
-            cache: res.headers.get(CACHE_STATUS_HEADER) || 'none',
-        }))
+        const cache = res.headers.get(CACHE_STATUS_HEADER)
+        // 只记录代理请求与错误响应，静态资源流量不进日志
+        if (cache !== null || res.status >= 400) {
+            console.log(JSON.stringify({
+                path: new URL(request.url).pathname.slice(0, 256),
+                method: request.method,
+                status: res.status,
+                ms: Date.now() - start,
+                cache: cache || 'none',
+            }))
+        }
         return res
     }
 }
@@ -328,7 +352,7 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
 
     if (cacheable && policy && req.method === 'GET' && res.status === 200 && isStorable(res)) {
         const cloned = res.clone()
-        const stored = new Response(cloned.body, cloned)
+        const stored = new Response(limitStream(cloned.body, CACHE_MAX_BYTES), cloned)
         stored.headers.set('cache-control', `public, max-age=${policy.ttl}${policy.immutable ? ', immutable' : ''}`)
         ctx.waitUntil(cache.put(new Request(urlObj.href, { method: 'GET' }), stored).catch(() => { }))
     }

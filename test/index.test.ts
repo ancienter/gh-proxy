@@ -1,5 +1,5 @@
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import worker from '../src/index'
 
 interface MockCall {
@@ -379,6 +379,29 @@ describe('cache', () => {
         expect(upstreamCalls).toBe(2)
     })
 
+    it('does not cache responses above the size limit', async () => {
+        const bigUpstream = 'https://github.com/cachetest/big/releases/download/v1/big.bin'
+        const bigViaProxy = 'https://example.com/https://github.com/cachetest/big/releases/download/v1/big.bin'
+        let upstreamCalls = 0
+        responder = route('GET', bigUpstream, () => {
+            upstreamCalls++
+            return new Response('x', { status: 200, headers: { 'content-length': String(500 * 1024 * 1024) } })
+        })
+
+        expect((await call(bigViaProxy)).headers.get('x-proxy-cache')).toBe('MISS')
+        expect((await call(bigViaProxy)).headers.get('x-proxy-cache')).toBe('MISS')
+        expect(upstreamCalls).toBe(2)
+    })
+
+    it('caches chunked responses that have no content-length', async () => {
+        const chunkedUpstream = 'https://github.com/cachetest/chunked/releases/download/v1/file.bin'
+        const chunkedViaProxy = 'https://example.com/https://github.com/cachetest/chunked/releases/download/v1/file.bin'
+        responder = route('GET', chunkedUpstream, () => new Response('chunked-body'))
+
+        expect((await call(chunkedViaProxy)).headers.get('x-proxy-cache')).toBe('MISS')
+        expect((await call(chunkedViaProxy)).headers.get('x-proxy-cache')).toBe('HIT')
+    })
+
     it('bypasses the cache for authorized requests', async () => {
         const authUpstream = 'https://github.com/cachetest/private/releases/download/v1/secret.bin'
         const authViaProxy = 'https://example.com/https://github.com/cachetest/private/releases/download/v1/secret.bin'
@@ -418,5 +441,23 @@ describe('health', () => {
         expect(res.headers.get('content-type')).toContain('application/json')
         expect(JSON.parse(await res.text()).status).toBe('ok')
         expect(calls).toHaveLength(0)
+    })
+})
+
+describe('observability', () => {
+    it('logs proxy requests but not static asset requests', async () => {
+        const spy = vi.spyOn(console, 'log').mockImplementation(() => { })
+        try {
+            await call('https://example.com/')
+            responder = route('GET', 'https://github.com/logtest/repo/releases/download/v1/f.bin', () => text('x'))
+            await call('https://example.com/https://github.com/logtest/repo/releases/download/v1/f.bin')
+
+            expect(spy).toHaveBeenCalledTimes(1)
+            const logged = JSON.parse(String(spy.mock.calls[0][0]))
+            expect(logged.status).toBe(200)
+            expect(logged.cache).toBe('MISS')
+        } finally {
+            spy.mockRestore()
+        }
     })
 })

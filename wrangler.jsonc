@@ -22,11 +22,11 @@
   "placement": {
     "mode": "smart"
   },
-  // per-IP 限流：60 请求 / 60 秒 / 单个 Cloudflare 节点
+  // per-IP 限流：60 请求 / 60 秒（近似，见 README）；namespace_id 取账号内唯一值
   "ratelimits": [
     {
       "name": "RATE_LIMITER",
-      "namespace_id": "1001",
+      "namespace_id": "20261013",
       "simple": {
         "limit": 60,
         "period": 60

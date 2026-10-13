@@ -81,7 +81,7 @@ npm run deploy
 - `GET /healthz`：健康检查，不访问上游（不受 PREFIX 影响）
 - 限流：代理路径 per-IP 60 请求/分钟，使用 Rate Limiting binding。该限流是尽力而为的近似值（计数器按机器本地缓存、异步同步，突发流量可能被分散到多台机器），需要严格限流可在 Cloudflare 控制台加 WAF Rate limiting rule
 - Smart Placement：Worker 尽量调度到靠近 GitHub 的位置，降低回源 RTT
-- 日志：路径、方法、状态码、耗时、缓存状态，不记录请求头
+- 日志：代理请求与错误响应记录路径、方法、状态码、耗时、缓存状态；静态资源流量不记日志，不记录请求头
 
 ### 开发与测试
 

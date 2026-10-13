@@ -184,11 +184,6 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
         })
     }
 
-    const limited = await checkRateLimit(req, cfg)
-    if (limited) {
-        return limited
-    }
-
     let path = urlObj.searchParams.get('q')
     if (path) {
         return Response.redirect('https://' + urlObj.host + cfg.prefix + path, 301)
@@ -275,6 +270,12 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
         reqHdrRaw.has('access-control-request-headers')
     ) {
         return new Response(null, PREFLIGHT_INIT)
+    }
+
+    // 限流只作用于上游代理路径，页面静态资源与 /healthz 不受影响
+    const limited = await checkRateLimit(req, cfg)
+    if (limited) {
+        return limited
     }
 
     let urlStr = pathname

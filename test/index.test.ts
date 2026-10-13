@@ -394,13 +394,20 @@ describe('cache', () => {
 })
 
 describe('abuse protection', () => {
-    it('returns 429 when the rate limiter rejects', async () => {
+    it('returns 429 when the rate limiter rejects proxy requests', async () => {
         const res = await call('https://example.com/https://github.com/a/b/archive/x.zip', undefined, {
             RATE_LIMITER: { limit: async () => ({ success: false }) },
         })
         expect(res.status).toBe(429)
         expect(res.headers.get('retry-after')).toBe('60')
         expect(calls).toHaveLength(0)
+    })
+
+    it('does not rate limit the bundled homepage', async () => {
+        const res = await call('https://example.com/', undefined, {
+            RATE_LIMITER: { limit: async () => ({ success: false }) },
+        })
+        expect(res.status).toBe(200)
     })
 })
 

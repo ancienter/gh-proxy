@@ -178,26 +178,7 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
     const urlObj = new URL(req.url)
 
     if (urlObj.pathname === HEALTHZ_PATH) {
-        // 诊断用：/healthz?probe=N 连续调用 N 次限流器，返回成功次数
-        const probe = Number(urlObj.searchParams.get('probe') || '0')
-        if (probe > 0 && cfg.limiter) {
-            let success = 0
-            for (let i = 0; i < probe; i++) {
-                const result = await cfg.limiter.limit({ key: 'probe:' + (urlObj.searchParams.get('key') || 'default') })
-                if (result.success) {
-                    success++
-                }
-            }
-            return new Response(JSON.stringify({ probe, success }), {
-                status: 200,
-                headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
-            })
-        }
-        return new Response(JSON.stringify({
-            status: 'ok',
-            limiter: typeof cfg.limiter?.limit === 'function',
-            time: new Date().toISOString(),
-        }), {
+        return new Response(JSON.stringify({ status: 'ok', time: new Date().toISOString() }), {
             status: 200,
             headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
         })

@@ -76,10 +76,10 @@ npm run deploy
 ### 行为说明
 
 - 上游白名单：仅 `github.com`、`*.github.com`、`*.githubusercontent.com`（含 `objects.`/`codeload.`/`raw.`/`gist.`/`api.`），且必须为 https；其他目标返回 403，跳转目标同样受限
-- 缓存：`/releases/download/` 资产与 tag archive 长期缓存；`.db` 等滚动资产短 TTL，配合 `If-None-Match`/`If-Modified-Since` 条件请求（未变化返回 304）；带 `Authorization` 的私有仓库请求绕过缓存；错误响应不缓存
+- 缓存：`/releases/download/` 资产与 tag archive 长期缓存（单个对象上限 400MB，超过则只流式转发不缓存）；`.db` 等滚动资产短 TTL，配合 `If-None-Match`/`If-Modified-Since` 条件请求（未变化返回 304）；带 `Authorization` 的私有仓库请求绕过缓存；错误响应不缓存
 - 响应头 `x-proxy-cache: HIT|MISS|BYPASS` 可观察缓存状态；Range/断点续传命中缓存时由边缘直接切片返回 206，HEAD 返回与 GET 相同的头
-- `GET /healthz`：健康检查，不访问上游
-- 限流：per-IP 60 请求/分钟/节点（Rate Limiting binding），超出返回 429
+- `GET /healthz`：健康检查，不访问上游（不受 PREFIX 影响）
+- 限流：代理路径 per-IP 60 请求/分钟，使用 Rate Limiting binding。该限流是尽力而为的近似值（计数器按机器本地缓存、异步同步，突发流量可能被分散到多台机器），需要严格限流可在 Cloudflare 控制台加 WAF Rate limiting rule
 - Smart Placement：Worker 尽量调度到靠近 GitHub 的位置，降低回源 RTT
 - 日志：路径、方法、状态码、耗时、缓存状态，不记录请求头
 

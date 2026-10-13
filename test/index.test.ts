@@ -139,7 +139,7 @@ describe('redirects', () => {
         responder = route('GET', 'https://github.com/a/b/archive/master.zip', () =>
             text('', 302, { location: 'https://github.com/a/b/releases/download/v1/x.zip' }))
 
-        const res = await call('https://example.com/github.com/a/b/archive/master.zip', undefined, { PREFIX: '/gh/' })
+        const res = await call('https://example.com/gh/github.com/a/b/archive/master.zip', undefined, { PREFIX: '/gh/' })
         expect(res.status).toBe(302)
         expect(res.headers.get('location')).toBe('/gh/https://github.com/a/b/releases/download/v1/x.zip')
     })

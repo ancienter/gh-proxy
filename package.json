@@ -1,0 +1,14 @@
+{
+  "name": "gh-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "github release、archive 以及项目文件的加速项目 (Cloudflare Workers)",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  }
+}

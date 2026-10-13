@@ -1,17 +1,15 @@
-'use strict'
-
 /**
- * static files (404.html, sw.js, conf.js)
+ * Cloudflare Workers ES-module version
+ *
+ * Config via environment variables (wrangler.toml [vars], dashboard, or .dev.vars):
+ *   ASSET_URL  static assets (homepage) url
+ *   PREFIX     path prefix, e.g. '/gh/' when routed as example.com/gh/*
+ *   JSDELIVR   '1' to use jsDelivr mirror for blob/raw branch files, '0' off
+ *   WHITE_LIST comma separated path fragments; empty means allow all
  */
-const ASSET_URL = 'https://hunshcn.github.io/gh-proxy/'
-// 前缀，如果自定义路由为example.com/gh/*，将PREFIX改为 '/gh/'，注意，少一个杠都会错！
-const PREFIX = '/'
-// 分支文件使用jsDelivr镜像的开关，0为关闭，默认关闭
-const Config = {
-    jsdelivr: 0
-}
 
-const whiteList = [] // 白名单，路径里面有包含字符的才会通过，e.g. ['/username/']
+const DEFAULT_ASSET_URL = 'https://hunshcn.github.io/gh-proxy/'
+const DEFAULT_PREFIX = '/'
 
 /** @type {ResponseInit} */
 const PREFLIGHT_INIT = {
@@ -22,7 +20,6 @@ const PREFLIGHT_INIT = {
         'access-control-max-age': '1728000',
     }),
 }
-
 
 const exp1 = /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/(?:releases|archive)\/.*$/i
 const exp2 = /^(?:https?:\/\/)?github\.com\/.+?\/.+?\/(?:blob|raw)\/.*$/i
@@ -53,13 +50,43 @@ function newUrl(urlStr) {
     }
 }
 
+/**
+ * @param {string} prefix
+ */
+function normalizePrefix(prefix) {
+    if (!prefix.startsWith('/')) {
+        prefix = '/' + prefix
+    }
+    if (!prefix.endsWith('/')) {
+        prefix = prefix + '/'
+    }
+    return prefix
+}
 
-addEventListener('fetch', e => {
-    const ret = fetchHandler(e)
-        .catch(err => makeRes('cfworker error:\n' + err.stack, 502))
-    e.respondWith(ret)
-})
+/**
+ * @param {Record<string, string>} env
+ */
+function getConfig(env) {
+    const jsdelivr = String(env.JSDELIVR || '0').toLowerCase()
+    return {
+        assetUrl: env.ASSET_URL || DEFAULT_ASSET_URL,
+        prefix: normalizePrefix(env.PREFIX || DEFAULT_PREFIX),
+        jsdelivr: jsdelivr === '1' || jsdelivr === 'true',
+        whiteList: String(env.WHITE_LIST || '').split(',').map(s => s.trim()).filter(Boolean),
+    }
+}
 
+export default {
+    /**
+     * @param {Request} request
+     * @param {Record<string, string>} env
+     * @param {ExecutionContext} ctx
+     */
+    async fetch(request, env, ctx) {
+        return fetchHandler(request, getConfig(env))
+            .catch(err => makeRes('cfworker error:\n' + err.stack, 502))
+    }
+}
 
 function checkUrl(u) {
     for (let i of [exp1, exp2, exp3, exp4, exp5, exp6]) {
@@ -71,38 +98,38 @@ function checkUrl(u) {
 }
 
 /**
- * @param {FetchEvent} e
+ * @param {Request} req
+ * @param {ReturnType<typeof getConfig>} cfg
  */
-async function fetchHandler(e) {
-    const req = e.request
+async function fetchHandler(req, cfg) {
     const urlStr = req.url
     const urlObj = new URL(urlStr)
     let path = urlObj.searchParams.get('q')
     if (path) {
-        return Response.redirect('https://' + urlObj.host + PREFIX + path, 301)
+        return Response.redirect('https://' + urlObj.host + cfg.prefix + path, 301)
     }
     // cfworker 会把路径中的 `//` 合并成 `/`
-    path = urlObj.href.slice(urlObj.origin.length + PREFIX.length).replace(/^https?:\/+/, 'https://')
+    path = urlObj.href.slice(urlObj.origin.length + cfg.prefix.length).replace(/^https?:\/+/, 'https://')
     if (path.search(exp1) === 0 || path.search(exp5) === 0 || path.search(exp6) === 0 || path.search(exp3) === 0) {
-        return httpHandler(req, path)
+        return httpHandler(req, path, cfg)
     } else if (path.search(exp2) === 0) {
-        if (Config.jsdelivr) {
+        if (cfg.jsdelivr) {
             const newUrl = path.replace('/blob/', '@').replace(/^(?:https?:\/\/)?github\.com/, 'https://cdn.jsdelivr.net/gh')
             return Response.redirect(newUrl, 302)
         } else {
             path = path.replace('/blob/', '/raw/')
-            return httpHandler(req, path)
+            return httpHandler(req, path, cfg)
         }
     } else if (path.search(exp4) === 0) {
-        if (Config.jsdelivr) {
+        if (cfg.jsdelivr) {
             const newUrl = path.replace(/(?<=com\/.+?\/.+?)\/(.+?\/)/, '@$1').replace(/^(?:https?:\/\/)?raw\.(?:githubusercontent|github)\.com/, 'https://cdn.jsdelivr.net/gh')
             return Response.redirect(newUrl, 302)
         }
         else {
-            return httpHandler(req, path)
+            return httpHandler(req, path, cfg)
         }
     } else {
-        return fetch(ASSET_URL + path)
+        return fetch(cfg.assetUrl + path)
     }
 }
 
@@ -110,8 +137,9 @@ async function fetchHandler(e) {
 /**
  * @param {Request} req
  * @param {string} pathname
+ * @param {ReturnType<typeof getConfig>} cfg
  */
-function httpHandler(req, pathname) {
+function httpHandler(req, pathname, cfg) {
     const reqHdrRaw = req.headers
 
     // preflight
@@ -124,8 +152,8 @@ function httpHandler(req, pathname) {
     const reqHdrNew = new Headers(reqHdrRaw)
 
     let urlStr = pathname
-    let flag = !Boolean(whiteList.length)
-    for (let i of whiteList) {
+    let flag = !Boolean(cfg.whiteList.length)
+    for (let i of cfg.whiteList) {
         if (urlStr.includes(i)) {
             flag = true
             break
@@ -146,7 +174,7 @@ function httpHandler(req, pathname) {
         redirect: 'manual',
         body: req.body
     }
-    return proxy(urlObj, reqInit)
+    return proxy(urlObj, reqInit, cfg)
 }
 
 
@@ -154,8 +182,9 @@ function httpHandler(req, pathname) {
  *
  * @param {URL} urlObj
  * @param {RequestInit} reqInit
+ * @param {ReturnType<typeof getConfig>} cfg
  */
-async function proxy(urlObj, reqInit) {
+async function proxy(urlObj, reqInit, cfg) {
     const res = await fetch(urlObj.href, reqInit)
     const resHdrOld = res.headers
     const resHdrNew = new Headers(resHdrOld)
@@ -165,10 +194,10 @@ async function proxy(urlObj, reqInit) {
     if (resHdrNew.has('location')) {
         let _location = resHdrNew.get('location')
         if (checkUrl(_location))
-            resHdrNew.set('location', PREFIX + _location)
+            resHdrNew.set('location', cfg.prefix + _location)
         else {
             reqInit.redirect = 'follow'
-            return proxy(newUrl(_location), reqInit)
+            return proxy(newUrl(_location), reqInit, cfg)
         }
     }
     resHdrNew.set('access-control-expose-headers', '*')
@@ -183,4 +212,3 @@ async function proxy(urlObj, reqInit) {
         headers: resHdrNew,
     })
 }
-

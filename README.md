@@ -2,7 +2,7 @@
 
 ## 简介
 
-github release、archive以及项目文件的加速项目，支持clone，有Cloudflare Workers无服务器版本以及Python版本
+github release、archive以及项目文件的加速项目，支持clone，部署在 Cloudflare Workers 上
 
 ## 演示
 
@@ -13,12 +13,6 @@ github release、archive以及项目文件的加速项目，支持clone，有Clo
 ![imagea272c95887343279.png](https://img.maocdn.cn/img/2021/04/24/imagea272c95887343279.png)
 
 当然也欢迎[捐赠](#捐赠)以支持作者
-
-## python版本和cf worker版本差异
-
-- python版本支持进行文件大小限制，超过设定返回原地址 [issue #8](https://github.com/hunshcn/gh-proxy/issues/8)
-
-- python版本支持特定user/repo 封禁/白名单 以及passby [issue #41](https://github.com/hunshcn/gh-proxy/issues/41)
 
 ## 使用
 
@@ -88,39 +82,6 @@ npm run deploy
 
 CI（GitHub Actions）执行类型生成一致性检查、`typecheck`、`test` 和 `wrangler deploy --dry-run`。
 
-## Python版本部署
-
-### Docker部署
-
-```
-docker run -d --name="gh-proxy-py" \
-  -p 0.0.0.0:80:80 \
-  --restart=always \
-  hunsh/gh-proxy-py:latest
-```
-
-第一个80是你要暴露出去的端口
-
-### 直接部署
-
-安装依赖（请使用python3）
-
-```pip install flask requests```
-
-按需求修改`app/main.py`的前几项配置
-
-*注意:* 可能需要在`return Response`前加两行
-```python3
-if 'Transfer-Encoding' in headers:
-    headers.pop('Transfer-Encoding')
-```
-
-### 注意
-
-python版本的机器如果无法正常访问github.io会启动报错，请自行修改静态文件url
-
-python版本默认走服务器（2021.3.27更新）
-
 ## Cloudflare Workers计费
 
 到 `overview` 页面可参看使用情况。免费版每天有 10 万次免费请求，并且有每分钟1000次请求的限制。
@@ -130,7 +91,6 @@ python版本默认走服务器（2021.3.27更新）
 ## Changelog
 
 * 2020.04.10 增加对`raw.githubusercontent.com`文件的支持
-* 2020.04.09 增加Python版本（使用Flask）
 * 2020.03.23 新增了clone的支持
 * 2020.03.22 初始版本
 

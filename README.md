@@ -86,7 +86,7 @@ npm run deploy
 ### 性能与缓存
 
 - **Range 首次请求**：可缓存对象（≤400MB）改为"拉全量 + 本地切片"，同时填充缓存，后续 Range/全量下载直接命中；超过上限的对象透传 Range
-- **建议在 zone 上启用 Cache Rule**（控制台或 API，不随仓库部署）：表达式 `http.request.uri.path contains "github.com"`，Cache eligibility = Eligible，Edge TTL 跟随源站。这样重复下载与断点续传可由离客户端最近的边缘节点直接返回，不必再转发到 Smart Placement 选定的执行节点
+- **建议在 zone 上启用 Cache Rule**（控制台或 API，不随仓库部署）：表达式 `http.request.uri.path contains "github.com"`，Cache eligibility = Eligible，Edge TTL 跟随源站。这样重复下载与断点续传可由离客户端最近的边缘节点直接返回，不必再转发到 Smart Placement 选定的执行节点。实测目前已有部分对象被边缘缓存（`cf-cache-status: HIT`），该规则主要用于让行为确定、覆盖非常见后缀的对象。API 版 `PUT /zones/{zone_id}/rulesets/phases/http_request_cache_settings/entrypoint` 会整体替换入口规则集，务必先读取现有规则再合并，或直接走控制台
 - **Smart Placement 权衡**：Worker 靠近 GitHub 可降低回源 RTT，但客户端到执行节点多一跳；如果客户端吞吐比首包延迟更重要，可删除 `wrangler.jsonc` 里的 `placement` 后对比
 - **api.github.com**：未认证调用使用 Worker 共享出口 IP（Cloudflare 网段），GitHub 限额 60 次/小时，容易被其他使用者耗尽而返回 403。请在请求中带 `Authorization`，代理会原样透传
 - 错误响应与带 `Authorization` 的响应均返回 `cache-control: no-store`，不会被任何共享缓存（含边缘 Cache Rule）缓存

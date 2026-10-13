@@ -163,7 +163,11 @@ function serveAsset(req, path, cfg) {
         return fetch(cfg.assetUrl + path)
     }
     if (cfg.assets) {
-        return cfg.assets.fetch(req)
+        // 资源绑定按完整路径匹配，需去掉 PREFIX 后再查询
+        const assetUrl = new URL(req.url)
+        const rest = assetUrl.pathname.slice(cfg.prefix.length)
+        assetUrl.pathname = rest === '' ? '/' : '/' + rest
+        return cfg.assets.fetch(assetUrl)
     }
     return fetch(DEFAULT_ASSET_URL + path)
 }

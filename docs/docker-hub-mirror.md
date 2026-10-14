@@ -58,11 +58,11 @@
 ## 阶段与验收
 
 - [x] **P0** 决策确认（见上）
-- [ ] **P1 骨架 + 开关**
+- [x] **P1 骨架 + 开关**
   - Config 增 `docker`；`/v2/*` 路由；白名单；405；realm 改写；跨主机去 Authorization；no-store
   - 验收：CI 绿；`DOCKER=0` 时既有测试全部不变；新增单测覆盖 401 realm 改写、manifest 透传、
     blob 跨主机去 auth、非白名单跳转不跟随、405、HEAD
-- [ ] **P2 `/token` 反代**
+- [x] **P2 `/token` 反代**
   - 查询参数与 Basic 透传，JSON 原样返回，`no-store`
   - 验收：单测通过；生产 curl 能换到 token
 - [ ] **P3 预发验证（开关打开）**

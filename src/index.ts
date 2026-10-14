@@ -123,6 +123,8 @@ const DOCKER_HOSTS = new Set([
     'registry-1.docker.io',
     'index.docker.io',
     'auth.docker.io',
+    // Docker Hub 的 blob CDN（实际观测到的跳转目标）
+    'production.cloudfront.docker.com',
     'production.cloudflare.docker.com',
     'docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com',
 ])

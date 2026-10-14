@@ -44,6 +44,10 @@ interface CachePolicy {
     immutable: boolean
 }
 
+function cacheControlFor(policy: CachePolicy): string {
+    return `public, max-age=${policy.ttl}${policy.immutable ? ', immutable' : ''}`
+}
+
 /** @type {ResponseInit} */
 const PREFLIGHT_INIT: ResponseInit = {
     status: 204,
@@ -351,8 +355,16 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
         // 包一层流会丢掉 content-length，导致缓存命中时 Range/HEAD 头部缺失
         const cloned = res.clone()
         const stored = new Response(cloned.body, cloned)
-        stored.headers.set('cache-control', `public, max-age=${policy.ttl}${policy.immutable ? ', immutable' : ''}`)
+        stored.headers.set('cache-control', cacheControlFor(policy))
         ctx.waitUntil(cache.put(new Request(urlObj.href, { method: 'GET' }), stored).catch(() => { }))
+    }
+
+    // 成功响应带上与缓存一致的 Cache-Control，让 zone 边缘缓存也能直接命中；
+    // 上游 release 资产默认不带 cache-control，缺了这行边缘会一直回源
+    if (policy && res.status === 200 &&
+        (req.method === 'GET' || req.method === 'HEAD') &&
+        !reqHdrRaw.has('authorization')) {
+        res.headers.set('cache-control', cacheControlFor(policy))
     }
 
     // 错误响应与私有仓库响应禁止任何共享缓存（含 zone 级 Cache Rule）
@@ -452,7 +464,7 @@ async function serveOpenRangeFromOrigin(
     }
     const cloned = full.clone()
     const stored = new Response(cloned.body, cloned)
-    stored.headers.set('cache-control', `public, max-age=${policy.ttl}${policy.immutable ? ', immutable' : ''}`)
+    stored.headers.set('cache-control', cacheControlFor(policy))
     ctx.waitUntil(cache.put(new Request(urlObj.href, { method: 'GET' }), stored).catch(() => { }))
     return sliceResponse(full, { start, end: total - 1 }, total)
 }

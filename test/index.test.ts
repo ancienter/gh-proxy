@@ -126,6 +126,8 @@ describe('proxying', () => {
         const res = await call('https://example.com/github.com/a/b/blob/master/f.js')
         expect(res.status).toBe(200)
         expect(await res.text()).toBe('raw-file')
+        // 非缓存策略路径不应被安上长 TTL
+        expect(res.headers.get('cache-control')).toBeNull()
     })
 
     it('redirects blob and raw requests to jsDelivr when enabled', async () => {
@@ -336,6 +338,7 @@ describe('cache', () => {
 
         const first = await call(viaProxy)
         expect(first.headers.get('x-proxy-cache')).toBe('MISS')
+        expect(first.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
         expect(await first.text()).toBe('0123456789')
 
         const second = await call(viaProxy)
@@ -490,6 +493,7 @@ describe('cache', () => {
 
         const first = await call(dbViaProxy)
         expect(first.headers.get('x-proxy-cache')).toBe('MISS')
+        expect(first.headers.get('cache-control')).toBe('public, max-age=300')
 
         const conditional = await call(dbViaProxy, { headers: { 'if-none-match': '"db1"' } })
         expect(conditional.status).toBe(304)

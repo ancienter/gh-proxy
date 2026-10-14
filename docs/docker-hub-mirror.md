@@ -88,6 +88,14 @@
     - 私有仓库、token、401、错误响应、非 200 一律 `private, no-store`
   - **明确不做 token 缓存**：token 与调用方凭据绑定，缓存等于凭据泄露
   - 验收：单测覆盖 Accept 分桶、白名单外绕过、blob 命中与 Range；生产实测 manifest/blob HIT
+  - 补充实测（2026-10-13）：3.8MB 与 68MB 层 MISS→HIT 正常；**237MB 层在 Worker 与边缘缓存都不被保留**
+    （`cf-cache-status: DYNAMIC` + `MISS`），故设 `DOCKER_BLOB_CACHE_MAX = 100MB`，超限只流式转发
+  - 响应去掉上游 CDN 的 `age`/`via`/`x-cache` 等痕迹（CloudFront 的 `age: 2258081` 曾与 `MISS` 同现，
+    误导缓存判断）
+  - Range 与整段 GET 同键：已缓存 68MB 层连续 4 次 Range 实测 4/4 HIT（0.13–0.66s）；未整段缓存过或
+    超过 100MB 的层每次回源，这正是"Range 有时 HIT 有时 MISS"的来源
+  - HEAD 探测在缓存命中时直接由缓存返回头部（不再回源）；`x-proxy-cache` 是写入时刻快照，
+    判断边缘缓存看 `cf-cache-status`
 - [ ] **P8 多 registry（待定，需先定产品范围）**
   - 现状：`/v2/ghcr.io/...` 等不代理。扩展需要按 registry 设计路由（路径前缀或独立域名）+ 各自 realm
     与 token 流程 + 各自的匿名限额策略

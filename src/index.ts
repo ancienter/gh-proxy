@@ -22,6 +22,9 @@ const MAX_REDIRECTS = 5
 const CACHE_NAME = 'gh-proxy'
 // Cache API 单对象上限为 512MB，留出余量
 const CACHE_MAX_BYTES = 400 * 1024 * 1024
+// docker blob 缓存上限：CF 文档标称 512MB，但实测 237MB 的层在 Worker 与边缘缓存里都不保留
+// （68MB 正常），故取保守阈值，超过的对象只流式转发不缓存
+const DOCKER_BLOB_CACHE_MAX = 100 * 1024 * 1024
 // 开区间 Range（bytes=N-）只有起点靠前时才全量拉取填充，避免大对象带宽放大
 const SLICE_FILL_MAX_PREFIX = 8 * 1024 * 1024
 // docker tag manifest 的 TTL（tag 可变，取短 TTL）
@@ -317,7 +320,7 @@ async function dockerHandler(req: Request, urlObj: URL, cfg: Config, ctx: Execut
             redirect: 'manual',
             signal: req.signal,
         }, cfg)
-        if (res.status === 200 && isStorable(res)) {
+        if (res.status === 200 && isStorable(res, target.kind === 'blobs' ? DOCKER_BLOB_CACHE_MAX : CACHE_MAX_BYTES)) {
             const ttl = dockerTtl(target, urlObj.pathname)
             const cloned = res.clone()
             const stored = new Response(cloned.body, cloned)
@@ -429,6 +432,10 @@ function rewriteAuthRealm(res: Response, urlObj: URL, cfg: Config): Response {
 function dockerResponse(res: Response, cacheStatus: 'HIT' | 'MISS' | 'BYPASS', target: DockerTarget): Response {
     const headers = new Headers(res.headers)
     headers.set(CACHE_STATUS_HEADER, cacheStatus)
+    // 去掉上游 CDN 的缓存痕迹（CloudFront 常驻几十天的 age 会让人误判缓存状态）
+    for (const name of ['age', 'via', 'x-cache', 'x-cache-hits', 'x-served-by', 'x-timer']) {
+        headers.delete(name)
+    }
     const publicBlob = target.kind === 'blobs' && res.status === 200 && cacheStatus !== 'BYPASS'
     if (publicBlob) {
         headers.set('cache-control', `public, max-age=${IMMUTABLE_TTL}, immutable`)
@@ -725,11 +732,11 @@ function headResponse(res: Response): Response {
     })
 }
 
-function isStorable(res: Response): boolean {
+function isStorable(res: Response, maxBytes = CACHE_MAX_BYTES): boolean {
     // 没有 content-length 的响应（codeload 动态生成的 tag archive 是 chunked）也允许入缓存；
     // 超出平台缓存上限时由 cache.put 自行拒绝，调用处已 catch
     const length = Number(res.headers.get('content-length') || '0')
-    return (!length || length <= CACHE_MAX_BYTES) && res.headers.get('vary') !== '*'
+    return (!length || length <= maxBytes) && res.headers.get('vary') !== '*'
 }
 
 function proxyRes(res: Response, headers: Headers): Response {

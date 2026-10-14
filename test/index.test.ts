@@ -702,6 +702,36 @@ describe('docker hub mirror', () => {
         expect(upstreamCalls).toBe(1)
     })
 
+    it('does not cache blobs above the docker size cap', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:huge'
+        let upstreamCalls = 0
+        responder = route('GET', blob, () => {
+            upstreamCalls++
+            return new Response('x', {
+                status: 200,
+                headers: { 'content-length': String(200 * 1024 * 1024) },
+            })
+        })
+
+        const first = await call('https://example.com/v2/library/alpine/blobs/sha256:huge', undefined, docker)
+        const second = await call('https://example.com/v2/library/alpine/blobs/sha256:huge', undefined, docker)
+        expect(first.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+        expect(second.headers.get('x-proxy-cache')).toBe('MISS')
+        expect(upstreamCalls).toBe(2)
+    })
+
+    it('strips upstream CDN age headers', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:aged'
+        responder = route('GET', blob, () => new Response('x', {
+            status: 200,
+            headers: { 'content-length': '1', 'age': '680705', 'x-cache': 'Hit from cloudfront' },
+        }))
+
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:aged', undefined, docker)
+        expect(res.headers.get('age')).toBeNull()
+        expect(res.headers.get('x-cache')).toBeNull()
+    })
+
     it('passes HEAD through for blob existence checks', async () => {
         const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:beef'
         responder = route('HEAD', blob, () => new Response(null, {

@@ -78,6 +78,8 @@
 - [ ] **P5 观测与收尾**
   - 观察日志与 429 比例（目前未出现 Docker 侧限流）；决定是否强制登录（拒绝无 Basic 的 `/token`）
   - README 已补配置片段（daemon.json / containerd / podman）与"强烈建议 docker login"说明；首页已加 Docker 使用说明
+  - 认证链路验证（2026-10-13）：伪造 Basic 凭据请求 `/token` 时 Docker 返回 `401 incorrect username or password`
+    → 凭据确实透传到 auth.docker.io；真实账号的额度归属需用户凭据实测
 - [x] **P7 registry 内容缓存（2026-10-13 追加，源自运营反馈）**
   - 问题：全程 `BYPASS` 导致重复拉取无提速，且 manifest 请求持续消耗共享出口 IP 的匿名额度
   - 方案：新增 `DOCKER_CACHE`（默认 `library`）白名单，只缓存**公开命名空间**的 manifest 与 blob

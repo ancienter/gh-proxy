@@ -34,6 +34,7 @@ interface Config {
     assetUrl: string
     prefix: string
     jsdelivr: boolean
+    docker: boolean
     whiteList: string[]
     assets: Fetcher | null
     limiter?: RateLimit
@@ -101,24 +102,41 @@ function joinAssetUrl(base: string, path: string): string {
 }
 
 function getConfig(env: Env): Config {
-    const jsdelivr = String(env.JSDELIVR || '0').toLowerCase()
     return {
         assetUrl: normalizeAssetUrl(env.ASSET_URL || ''),
         prefix: normalizePrefix(env.PREFIX || DEFAULT_PREFIX),
-        jsdelivr: jsdelivr === '1' || jsdelivr === 'true',
+        jsdelivr: truthy(env.JSDELIVR),
+        docker: truthy(env.DOCKER),
         whiteList: String(env.WHITE_LIST || '').split(',').map(s => s.trim()).filter(Boolean),
         assets: env.ASSETS || null,
         limiter: env.RATE_LIMITER,
     }
 }
 
-/** 上游白名单：仅 GitHub 自有域名，且必须 https（防 SSRF） */
-function isAllowedUpstream(url: URL): boolean {
+function truthy(value: string | undefined): boolean {
+    const normalized = String(value || '').toLowerCase()
+    return normalized === '1' || normalized === 'true'
+}
+
+/** Docker Hub 及其 blob CDN；仅 DOCKER=1 时启用 */
+const DOCKER_HOSTS = new Set([
+    'registry-1.docker.io',
+    'index.docker.io',
+    'auth.docker.io',
+    'production.cloudflare.docker.com',
+    'docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com',
+])
+
+/** 上游白名单：GitHub 自有域名（+ DOCKER=1 时的 Docker 主机），且必须 https（防 SSRF） */
+function isAllowedUpstream(url: URL, cfg: Config): boolean {
     if (url.protocol !== 'https:') {
         return false
     }
     const host = url.hostname
-    return host === 'github.com' || host.endsWith('.github.com') || host.endsWith('.githubusercontent.com')
+    if (host === 'github.com' || host.endsWith('.github.com') || host.endsWith('.githubusercontent.com')) {
+        return true
+    }
+    return cfg.docker && DOCKER_HOSTS.has(host)
 }
 
 /** 只有明确的不可变/可重验证路径进缓存 */
@@ -196,6 +214,16 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
         })
     }
 
+    if (cfg.docker) {
+        const v2Path = cfg.prefix + 'v2'
+        if (urlObj.pathname === v2Path || urlObj.pathname.startsWith(v2Path + '/')) {
+            return dockerHandler(req, urlObj, cfg)
+        }
+        if (urlObj.pathname === cfg.prefix + 'token') {
+            return tokenHandler(req, urlObj, cfg)
+        }
+    }
+
     let path = urlObj.searchParams.get('q')
     if (path) {
         return Response.redirect('https://' + urlObj.host + cfg.prefix + path, 301)
@@ -217,7 +245,7 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
         if (!target) {
             return new Response('bad url', { status: 400 })
         }
-        if (!isAllowedUpstream(target)) {
+        if (!isAllowedUpstream(target, cfg)) {
             return new Response('forbidden host', { status: 403 })
         }
     }
@@ -246,10 +274,89 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
 }
 
 /**
+ * Docker Registry v2 只读透传（DOCKER=1）。
+ * 不做任何缓存：私有镜像的 blob 一旦进共享缓存就会对匿名请求放行，故一律 no-store。
+ * manifest 的内容协商（Accept）与 blob 的 Range 均原样透传。
+ */
+async function dockerHandler(req: Request, urlObj: URL, cfg: Config): Promise<Response> {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        return new Response('method not allowed', {
+            status: 405,
+            headers: { 'allow': 'GET, HEAD', 'cache-control': 'no-store' },
+        })
+    }
+    const limited = await checkRateLimit(req, cfg)
+    if (limited) {
+        return limited
+    }
+    const registryUrl = new URL('https://registry-1.docker.io/')
+    registryUrl.pathname = urlObj.pathname.slice(cfg.prefix.length - 1)
+    registryUrl.search = urlObj.search
+    const res = await proxy(registryUrl, {
+        method: req.method,
+        headers: new Headers(req.headers),
+        redirect: 'manual',
+        signal: req.signal,
+    }, cfg)
+    return dockerResponse(res.status === 401 ? rewriteAuthRealm(res, urlObj, cfg) : res)
+}
+
+/** 反代 auth.docker.io/token，客户端无需直连该域名 */
+async function tokenHandler(req: Request, urlObj: URL, cfg: Config): Promise<Response> {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        return new Response('method not allowed', {
+            status: 405,
+            headers: { 'allow': 'GET, HEAD', 'cache-control': 'no-store' },
+        })
+    }
+    const limited = await checkRateLimit(req, cfg)
+    if (limited) {
+        return limited
+    }
+    const tokenUrl = new URL('https://auth.docker.io/token')
+    tokenUrl.search = urlObj.search
+    // Basic 凭据（docker login）随请求头透传；匿名请求不带该头
+    const res = await proxy(tokenUrl, {
+        method: 'GET',
+        headers: new Headers(req.headers),
+        redirect: 'manual',
+        signal: req.signal,
+    }, cfg)
+    return dockerResponse(res)
+}
+
+/** 把 401 的 realm 指向本服务 */
+function rewriteAuthRealm(res: Response, urlObj: URL, cfg: Config): Response {
+    const challenge = res.headers.get('www-authenticate')
+    if (!challenge || !challenge.includes('realm=')) {
+        return res
+    }
+    const realm = `https://${urlObj.host}${cfg.prefix}token`
+    const headers = new Headers(res.headers)
+    headers.set('www-authenticate', challenge.replace(/realm="[^"]*"/, `realm="${realm}"`))
+    return new Response(res.body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers,
+    })
+}
+
+/** docker 路径响应：明确不可缓存，避免私有镜像内容进入共享缓存 */
+function dockerResponse(res: Response): Response {
+    const headers = new Headers(res.headers)
+    headers.set('cache-control', 'private, no-store')
+    headers.set(CACHE_STATUS_HEADER, 'BYPASS')
+    return new Response(res.body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers,
+    })
+}
+
+/**
  * 未知路径回退到主页静态资源
  */
-function serveAsset(req: Request, path: string, cfg: Config): Promise<Response> {
-    if (cfg.assetUrl) {
+function serveAsset(req: Request, path: string, cfg: Config): Promise<Response> {    if (cfg.assetUrl) {
         return fetch(joinAssetUrl(cfg.assetUrl, path))
     }
     if (cfg.assets) {
@@ -298,7 +405,7 @@ async function httpHandler(req: Request, pathname: string, cfg: Config, ctx: Exe
     if (!urlObj) {
         return new Response('bad url', { status: 400 })
     }
-    if (!isAllowedUpstream(urlObj)) {
+    if (!isAllowedUpstream(urlObj, cfg)) {
         return new Response('forbidden host', { status: 403 })
     }
 
@@ -525,6 +632,12 @@ function proxyRes(res: Response, headers: Headers): Response {
     })
 }
 
+function withoutAuthorization(headers: HeadersInit | undefined): Headers {
+    const copy = new Headers(headers)
+    copy.delete('authorization')
+    return copy
+}
+
 function checkUrl(u: string): boolean {
     for (let i of [exp1, exp2, exp3, exp4, exp5, exp6]) {
         if (u.search(i) === 0) {
@@ -554,7 +667,7 @@ async function proxy(urlObj: URL, reqInit: RequestInit, cfg: Config): Promise<Re
             return proxyRes(res, headers)
         }
         const nextUrl = newUrl(location, currentUrl)
-        if (!nextUrl || !isAllowedUpstream(nextUrl)) {
+        if (!nextUrl || !isAllowedUpstream(nextUrl, cfg)) {
             break
         }
         let method = reqInit.method || 'GET'
@@ -568,10 +681,14 @@ async function proxy(urlObj: URL, reqInit: RequestInit, cfg: Config): Promise<Re
                 break
             }
         }
+        // 跨主机跳转不携带 Authorization（registry token 不外泄给 CDN 等第三方主机）
+        const headers = nextUrl.hostname === currentUrl.hostname
+            ? reqInit.headers
+            : withoutAuthorization(reqInit.headers)
         currentUrl = nextUrl
         reqInit = {
             method,
-            headers: reqInit.headers,
+            headers,
             redirect: 'manual',
             signal: reqInit.signal,
         }

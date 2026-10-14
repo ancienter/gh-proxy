@@ -38,6 +38,8 @@
     "ASSET_URL": "",
     // 前缀，如果自定义路由为 example.com/gh/*，将 PREFIX 改为 '/gh/'
     "PREFIX": "/",
+    // Docker Hub 只读镜像开关（'1' 开启 /v2 与 /token 路由）
+    "DOCKER": "0",
     // 分支文件使用 jsDelivr 镜像的开关，0 为关闭
     "JSDELIVR": "0",
     // 白名单，逗号分隔，路径中包含任一字符才通过，留空表示不限制

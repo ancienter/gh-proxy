@@ -68,6 +68,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}): Env => ({
     ASSETS: env.ASSETS,
     ASSET_URL: '',
     PREFIX: '/',
+    DOCKER: '0',
     JSDELIVR: '0',
     WHITE_LIST: '',
     RATE_LIMITER: { limit: async () => ({ success: true }) },
@@ -579,6 +580,175 @@ describe('health', () => {
         expect(res.status).toBe(200)
         expect(res.headers.get('content-type')).toContain('application/json')
         expect(JSON.parse(await res.text()).status).toBe('ok')
+        expect(calls).toHaveLength(0)
+    })
+})
+
+describe('docker hub mirror', () => {
+    const docker = { DOCKER: '1' }
+
+    it('keeps docker routes disabled by default', async () => {
+        const res = await call('https://example.com/v2/')
+        expect(res.status).toBe(404)
+        expect(calls).toHaveLength(0)
+
+        const forbidden = await call('https://example.com/https://registry-1.docker.io/v2/')
+        expect(forbidden.status).toBe(403)
+        expect(calls).toHaveLength(0)
+    })
+
+    it('rewrites the 401 auth realm to this host', async () => {
+        responder = route('GET', 'https://registry-1.docker.io/v2/', () =>
+            new Response('{}', {
+                status: 401,
+                headers: {
+                    'www-authenticate': 'Bearer realm="https://auth.docker.io/token",service="registry.docker.io"',
+                },
+            }))
+
+        const res = await call('https://example.com/v2/', undefined, docker)
+        expect(res.status).toBe(401)
+        expect(res.headers.get('www-authenticate')).toBe('Bearer realm="https://example.com/token",service="registry.docker.io"')
+        expect(res.headers.get('cache-control')).toBe('private, no-store')
+        expect(res.headers.get('x-proxy-cache')).toBe('BYPASS')
+    })
+
+    it('proxies manifests with auth and Accept headers, never caching them', async () => {
+        const manifest = 'https://registry-1.docker.io/v2/library/alpine/manifests/latest'
+        let seenAuth: string | null = null
+        let seenAccept: string | null = null
+        responder = route('GET', manifest, (call) => {
+            seenAuth = call.headers?.get('authorization') || null
+            seenAccept = call.headers?.get('accept') || null
+            return new Response('{"schemaVersion":2}', {
+                status: 200,
+                headers: {
+                    'content-type': 'application/vnd.docker.distribution.manifest.v2+json',
+                    'docker-content-digest': 'sha256:abc',
+                },
+            })
+        })
+
+        const res = await call('https://example.com/v2/library/alpine/manifests/latest', {
+            headers: {
+                authorization: 'Bearer tok',
+                accept: 'application/vnd.docker.distribution.manifest.v2+json',
+            },
+        }, docker)
+        expect(res.status).toBe(200)
+        expect(res.headers.get('docker-content-digest')).toBe('sha256:abc')
+        expect(res.headers.get('cache-control')).toBe('private, no-store')
+        expect(seenAuth).toBe('Bearer tok')
+        expect(seenAccept).toBe('application/vnd.docker.distribution.manifest.v2+json')
+    })
+
+    it('passes HEAD through for blob existence checks', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:beef'
+        responder = route('HEAD', blob, () => new Response(null, {
+            status: 200,
+            headers: { 'content-length': '1024', 'docker-content-digest': 'sha256:beef' },
+        }))
+
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:beef', { method: 'HEAD' }, docker)
+        expect(res.status).toBe(200)
+        expect(res.headers.get('content-length')).toBe('1024')
+        expect(calls[0].method).toBe('HEAD')
+    })
+
+    it('strips Authorization when following a redirect to the blob CDN', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:deadbeef'
+        const cdn = 'https://production.cloudflare.docker.com/blobs/sha256:deadbeef'
+        let cdnAuth: string | null | undefined = 'unset'
+        responder = (call) => {
+            if (call.url.href === blob) {
+                return new Response(null, { status: 307, headers: { location: cdn } })
+            }
+            if (call.url.href === cdn) {
+                cdnAuth = call.headers?.get('authorization')
+                return new Response('blob-body', { status: 200, headers: { 'content-length': '9' } })
+            }
+            return null
+        }
+
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:deadbeef', {
+            headers: { authorization: 'Bearer tok' },
+        }, docker)
+        expect(res.status).toBe(200)
+        expect(await res.text()).toBe('blob-body')
+        expect(cdnAuth ?? null).toBeNull()
+        expect(res.headers.get('cache-control')).toBe('private, no-store')
+    })
+
+    it('keeps Authorization on same-host redirects', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:deadbeef'
+        const redirected = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:redirected'
+        let seenAuth: string | null = null
+        responder = (call) => {
+            if (call.url.href === blob) {
+                return new Response(null, { status: 307, headers: { location: redirected } })
+            }
+            if (call.url.href === redirected) {
+                seenAuth = call.headers?.get('authorization') || null
+                return new Response('ok', { status: 200 })
+            }
+            return null
+        }
+
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:deadbeef', {
+            headers: { authorization: 'Bearer tok' },
+        }, docker)
+        expect(res.status).toBe(200)
+        expect(seenAuth).toBe('Bearer tok')
+    })
+
+    it('does not follow redirects to hosts outside the allowlist', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:deadbeef'
+        responder = route('GET', blob, () =>
+            new Response(null, { status: 307, headers: { location: 'https://example.com/evil' } }))
+
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:deadbeef', undefined, docker)
+        expect(res.status).toBe(307)
+        expect(res.headers.get('location')).toBe('https://example.com/evil')
+        expect(calls).toHaveLength(1)
+    })
+
+    it('rejects push methods', async () => {
+        const res = await call('https://example.com/v2/library/alpine/blobs/uploads/', { method: 'PUT' }, docker)
+        expect(res.status).toBe(405)
+        expect(res.headers.get('allow')).toBe('GET, HEAD')
+        expect(calls).toHaveLength(0)
+    })
+
+    it('proxies the token endpoint with query and basic credentials', async () => {
+        let tokenQuery = ''
+        let tokenAuth: string | null = null
+        responder = (call) => {
+            if (call.url.origin !== 'https://auth.docker.io' || call.url.pathname !== '/token') {
+                return null
+            }
+            tokenQuery = call.url.search
+            tokenAuth = call.headers?.get('authorization') || null
+            return new Response('{"token":"t"}', { status: 200, headers: { 'content-type': 'application/json' } })
+        }
+
+        const res = await call(
+            'https://example.com/token?service=registry.docker.io&scope=repository:library/alpine:pull',
+            { headers: { authorization: 'Basic dXNlcjpwYXNz' } },
+            docker,
+        )
+        expect(res.status).toBe(200)
+        expect(JSON.parse(await res.text()).token).toBe('t')
+        expect(tokenQuery).toBe('?service=registry.docker.io&scope=repository:library/alpine:pull')
+        expect(tokenAuth).toBe('Basic dXNlcjpwYXNz')
+        expect(res.headers.get('cache-control')).toBe('private, no-store')
+    })
+
+    it('rate limits docker requests', async () => {
+        const res = await call('https://example.com/v2/', undefined, {
+            DOCKER: '1',
+            RATE_LIMITER: { limit: async () => ({ success: false }) },
+        })
+        expect(res.status).toBe(429)
         expect(calls).toHaveLength(0)
     })
 })

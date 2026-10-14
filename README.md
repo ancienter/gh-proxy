@@ -76,6 +76,7 @@ npm run deploy
 ### 行为说明
 
 - 上游白名单：仅 `github.com`、`*.github.com`、`*.githubusercontent.com`（含 `objects.`/`codeload.`/`raw.`/`gist.`/`api.`），且必须为 https；其他目标返回 403，跳转目标同样受限
+- Docker Hub 只读镜像（可选，默认关闭）：`DOCKER="1"` 时开启 `/v2/*` 与 `/token` 反代，客户端无需直连 `auth.docker.io`；实现计划与阶段见 [docs/docker-hub-mirror.md](docs/docker-hub-mirror.md)
 - 缓存：`/releases/download/` 资产与 tag archive 长期缓存（`public, max-age=31536000, immutable`）；`.db` 等滚动资产 `max-age=300`，配合 `If-None-Match`/`If-Modified-Since` 条件请求（未变化返回 304）。成功响应会带上同样的 `Cache-Control`，因此 zone 边缘缓存无需额外 Cache Rule 即可命中；带 `Authorization` 的私有仓库请求绕过缓存并返回 `no-store`；错误响应不缓存
 - 响应头 `x-proxy-cache: HIT|MISS|BYPASS` 可观察缓存状态；Range/断点续传命中缓存时由边缘直接切片返回 206，HEAD 返回与 GET 相同的头
 - `GET /healthz`：健康检查，不访问上游（不受 PREFIX 影响）

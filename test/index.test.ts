@@ -69,6 +69,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}): Env => ({
     ASSET_URL: '',
     PREFIX: '/',
     DOCKER: '0',
+    DOCKER_CACHE: 'library',
     JSDELIVR: '0',
     WHITE_LIST: '',
     RATE_LIMITER: { limit: async () => ({ success: true }) },
@@ -613,13 +614,11 @@ describe('docker hub mirror', () => {
         expect(res.headers.get('x-proxy-cache')).toBe('BYPASS')
     })
 
-    it('proxies manifests with auth and Accept headers, never caching them', async () => {
+    it('proxies manifests with auth and Accept headers, caching per Accept', async () => {
         const manifest = 'https://registry-1.docker.io/v2/library/alpine/manifests/latest'
-        let seenAuth: string | null = null
-        let seenAccept: string | null = null
-        responder = route('GET', manifest, (call) => {
-            seenAuth = call.headers?.get('authorization') || null
-            seenAccept = call.headers?.get('accept') || null
+        let upstreamCalls = 0
+        responder = route('GET', manifest, () => {
+            upstreamCalls++
             return new Response('{"schemaVersion":2}', {
                 status: 200,
                 headers: {
@@ -629,17 +628,78 @@ describe('docker hub mirror', () => {
             })
         })
 
-        const res = await call('https://example.com/v2/library/alpine/manifests/latest', {
+        const first = await call('https://example.com/v2/library/alpine/manifests/latest', {
             headers: {
                 authorization: 'Bearer tok',
                 accept: 'application/vnd.docker.distribution.manifest.v2+json',
             },
         }, docker)
-        expect(res.status).toBe(200)
-        expect(res.headers.get('docker-content-digest')).toBe('sha256:abc')
-        expect(res.headers.get('cache-control')).toBe('private, no-store')
-        expect(seenAuth).toBe('Bearer tok')
-        expect(seenAccept).toBe('application/vnd.docker.distribution.manifest.v2+json')
+        expect(first.status).toBe(200)
+        expect(first.headers.get('docker-content-digest')).toBe('sha256:abc')
+        expect(first.headers.get('cache-control')).toBe('private, no-store')
+        expect(first.headers.get('x-proxy-cache')).toBe('MISS')
+
+        const second = await call('https://example.com/v2/library/alpine/manifests/latest', {
+            headers: {
+                authorization: 'Bearer tok',
+                accept: 'application/vnd.docker.distribution.manifest.v2+json',
+            },
+        }, docker)
+        expect(second.headers.get('x-proxy-cache')).toBe('HIT')
+        expect(await second.text()).toBe('{"schemaVersion":2}')
+        expect(upstreamCalls).toBe(1)
+
+        // 不同 Accept 是不同变体，不能共用缓存
+        const other = await call('https://example.com/v2/library/alpine/manifests/latest', {
+            headers: { accept: 'application/vnd.oci.image.index.v1+json' },
+        }, docker)
+        expect(other.headers.get('x-proxy-cache')).toBe('MISS')
+        expect(upstreamCalls).toBe(2)
+    })
+
+    it('never caches repos outside the public namespace allowlist', async () => {
+        const manifest = 'https://registry-1.docker.io/v2/myorg/private/manifests/latest'
+        let upstreamCalls = 0
+        responder = route('GET', manifest, () => {
+            upstreamCalls++
+            return new Response('{"schemaVersion":2}', { status: 200 })
+        })
+
+        const first = await call('https://example.com/v2/myorg/private/manifests/latest', undefined, docker)
+        const second = await call('https://example.com/v2/myorg/private/manifests/latest', undefined, docker)
+        expect(first.headers.get('x-proxy-cache')).toBe('BYPASS')
+        expect(second.headers.get('x-proxy-cache')).toBe('BYPASS')
+        expect(first.headers.get('cache-control')).toBe('private, no-store')
+        expect(upstreamCalls).toBe(2)
+    })
+
+    it('caches public blobs and serves ranges from cache', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:beef'
+        let upstreamCalls = 0
+        responder = route('GET', blob, () => {
+            upstreamCalls++
+            return new Response('0123456789', {
+                status: 200,
+                headers: { 'content-length': '10', 'docker-content-digest': 'sha256:beef' },
+            })
+        })
+
+        const first = await call('https://example.com/v2/library/alpine/blobs/sha256:beef', undefined, docker)
+        expect(first.headers.get('x-proxy-cache')).toBe('MISS')
+        expect(first.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
+        expect(await first.text()).toBe('0123456789')
+
+        const second = await call('https://example.com/v2/library/alpine/blobs/sha256:beef', undefined, docker)
+        expect(second.headers.get('x-proxy-cache')).toBe('HIT')
+        expect(upstreamCalls).toBe(1)
+
+        const ranged = await call('https://example.com/v2/library/alpine/blobs/sha256:beef', {
+            headers: { range: 'bytes=2-5' },
+        }, docker)
+        expect(ranged.status).toBe(206)
+        expect(ranged.headers.get('content-range')).toBe('bytes 2-5/10')
+        expect(await ranged.text()).toBe('2345')
+        expect(upstreamCalls).toBe(1)
     })
 
     it('passes HEAD through for blob existence checks', async () => {
@@ -676,7 +736,7 @@ describe('docker hub mirror', () => {
         expect(res.status).toBe(200)
         expect(await res.text()).toBe('blob-body')
         expect(cdnAuth ?? null).toBeNull()
-        expect(res.headers.get('cache-control')).toBe('private, no-store')
+        expect(res.headers.get('cache-control')).toBe('public, max-age=31536000, immutable')
     })
 
     it('keeps Authorization on same-host redirects', async () => {

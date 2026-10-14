@@ -24,6 +24,8 @@ const CACHE_NAME = 'gh-proxy'
 const CACHE_MAX_BYTES = 400 * 1024 * 1024
 // 开区间 Range（bytes=N-）只有起点靠前时才全量拉取填充，避免大对象带宽放大
 const SLICE_FILL_MAX_PREFIX = 8 * 1024 * 1024
+// docker tag manifest 的 TTL（tag 可变，取短 TTL）
+const DOCKER_TAG_TTL = 300
 const IMMUTABLE_TTL = 31536000
 const ROLLING_TTL = 300
 const CACHE_STATUS_HEADER = 'x-proxy-cache'
@@ -35,6 +37,7 @@ interface Config {
     prefix: string
     jsdelivr: boolean
     docker: boolean
+    dockerCache: string[]
     whiteList: string[]
     assets: Fetcher | null
     limiter?: RateLimit
@@ -107,6 +110,7 @@ function getConfig(env: Env): Config {
         prefix: normalizePrefix(env.PREFIX || DEFAULT_PREFIX),
         jsdelivr: truthy(env.JSDELIVR),
         docker: truthy(env.DOCKER),
+        dockerCache: String(env.DOCKER_CACHE || '').split(',').map(s => s.trim()).filter(Boolean),
         whiteList: String(env.WHITE_LIST || '').split(',').map(s => s.trim()).filter(Boolean),
         assets: env.ASSETS || null,
         limiter: env.RATE_LIMITER,
@@ -219,7 +223,7 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
     if (cfg.docker) {
         const v2Path = cfg.prefix + 'v2'
         if (urlObj.pathname === v2Path || urlObj.pathname.startsWith(v2Path + '/')) {
-            return dockerHandler(req, urlObj, cfg)
+            return dockerHandler(req, urlObj, cfg, ctx)
         }
         if (urlObj.pathname === cfg.prefix + 'token') {
             return tokenHandler(req, urlObj, cfg)
@@ -277,10 +281,12 @@ async function handle(req: Request, cfg: Config, ctx: ExecutionContext): Promise
 
 /**
  * Docker Registry v2 只读透传（DOCKER=1）。
- * 不做任何缓存：私有镜像的 blob 一旦进共享缓存就会对匿名请求放行，故一律 no-store。
- * manifest 的内容协商（Accept）与 blob 的 Range 均原样透传。
+ *
+ * 缓存：只有白名单公开命名空间（DOCKER_CACHE，默认 library）的 manifest 与 blob 进缓存；
+ * 私有仓库、token、错误响应一律 `private, no-store`，绝不让私有内容进入共享缓存。
+ * manifest 按 Accept 区分缓存键（内容协商）；blob 按 digest 寻址、不可变，可长期缓存。
  */
-async function dockerHandler(req: Request, urlObj: URL, cfg: Config): Promise<Response> {
+async function dockerHandler(req: Request, urlObj: URL, cfg: Config, ctx: ExecutionContext): Promise<Response> {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
         return new Response('method not allowed', {
             status: 405,
@@ -291,40 +297,111 @@ async function dockerHandler(req: Request, urlObj: URL, cfg: Config): Promise<Re
     if (limited) {
         return limited
     }
-    const registryUrl = new URL('https://registry-1.docker.io/')
-    registryUrl.pathname = urlObj.pathname.slice(cfg.prefix.length - 1)
-    registryUrl.search = urlObj.search
+
+    const target = parseDockerPath(urlObj.pathname)
+    const cacheable = req.method === 'GET' &&
+        (target.kind === 'blobs' || target.kind === 'manifests') &&
+        isPublicRepo(target.repo, cfg)
+    const cacheKey = dockerCacheKey(target, urlObj, req)
+
+    if (cacheable && cacheKey) {
+        const cache = await caches.open(CACHE_NAME)
+        const hit = await cache.match(dockerMatchRequest(cacheKey, req, target.kind === 'blobs'), { ignoreMethod: true })
+        if (hit) {
+            return dockerResponse(hit, 'HIT', target)
+        }
+        const registryUrl = dockerUpstreamUrl(urlObj, cfg)
+        const res = await proxy(registryUrl, {
+            method: req.method,
+            headers: new Headers(req.headers),
+            redirect: 'manual',
+            signal: req.signal,
+        }, cfg)
+        if (res.status === 200 && isStorable(res)) {
+            const ttl = dockerTtl(target, urlObj.pathname)
+            const cloned = res.clone()
+            const stored = new Response(cloned.body, cloned)
+            stored.headers.set('cache-control', `public, max-age=${ttl}${ttl === IMMUTABLE_TTL ? ', immutable' : ''}`)
+            ctx.waitUntil(cache.put(cacheKey, stored).catch(() => { }))
+        }
+        return dockerResponse(res.status === 401 ? rewriteAuthRealm(res, urlObj, cfg) : res, 'MISS', target)
+    }
+
+    const registryUrl = dockerUpstreamUrl(urlObj, cfg)
     const res = await proxy(registryUrl, {
         method: req.method,
         headers: new Headers(req.headers),
         redirect: 'manual',
         signal: req.signal,
     }, cfg)
-    return dockerResponse(res.status === 401 ? rewriteAuthRealm(res, urlObj, cfg) : res)
+    return dockerResponse(res.status === 401 ? rewriteAuthRealm(res, urlObj, cfg) : res, 'BYPASS', target)
 }
 
-/** 反代 auth.docker.io/token，客户端无需直连该域名 */
-async function tokenHandler(req: Request, urlObj: URL, cfg: Config): Promise<Response> {
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-        return new Response('method not allowed', {
-            status: 405,
-            headers: { 'allow': 'GET, HEAD', 'cache-control': 'no-store' },
-        })
+function dockerUpstreamUrl(urlObj: URL, cfg: Config): URL {
+    const registryUrl = new URL('https://registry-1.docker.io/')
+    registryUrl.pathname = urlObj.pathname.slice(cfg.prefix.length - 1)
+    registryUrl.search = urlObj.search
+    return registryUrl
+}
+
+interface DockerTarget {
+    repo: string | null
+    kind: 'manifests' | 'blobs' | 'other'
+}
+
+function parseDockerPath(pathname: string): DockerTarget {
+    const match = /\/v2\/(.+?)\/(manifests|blobs)\//.exec(pathname)
+    if (!match) {
+        return { repo: null, kind: 'other' }
     }
-    const limited = await checkRateLimit(req, cfg)
-    if (limited) {
-        return limited
+    return { repo: match[1], kind: match[2] as 'manifests' | 'blobs' }
+}
+
+/** 只缓存明确公开的命名空间（library 为 Docker 官方命名空间，永远公开） */
+function isPublicRepo(repo: string | null, cfg: Config): boolean {
+    if (!repo) {
+        return false
     }
-    const tokenUrl = new URL('https://auth.docker.io/token')
-    tokenUrl.search = urlObj.search
-    // Basic 凭据（docker login）随请求头透传；匿名请求不带该头
-    const res = await proxy(tokenUrl, {
-        method: 'GET',
-        headers: new Headers(req.headers),
-        redirect: 'manual',
-        signal: req.signal,
-    }, cfg)
-    return dockerResponse(res)
+    return cfg.dockerCache.some((prefix) => repo.startsWith(prefix + '/'))
+}
+
+function hashString(value: string): string {
+    let hash = 2166136261
+    for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i)
+        hash = Math.imul(hash, 16777619)
+    }
+    return (hash >>> 0).toString(16)
+}
+
+/** manifest 按 Accept 分桶，避免内容协商拿错变体；blob 不需要 */
+function dockerCacheKey(target: DockerTarget, urlObj: URL, req: Request): Request | null {
+    if (target.kind === 'other') {
+        return null
+    }
+    const key = new URL(urlObj.href)
+    if (target.kind === 'manifests') {
+        key.searchParams.set('__accept', hashString(req.headers.get('accept') || ''))
+    }
+    return new Request(key.href, { method: 'GET' })
+}
+
+function dockerMatchRequest(key: Request, req: Request, withRange: boolean): Request {
+    const headers = new Headers()
+    if (withRange) {
+        const range = req.headers.get('range')
+        if (range) {
+            headers.set('range', range)
+        }
+    }
+    return new Request(key.url, { method: 'GET', headers })
+}
+
+function dockerTtl(target: DockerTarget, pathname: string): number {
+    if (target.kind === 'blobs' || pathname.includes('/manifests/sha256:')) {
+        return IMMUTABLE_TTL
+    }
+    return DOCKER_TAG_TTL
 }
 
 /** 把 401 的 realm 指向本服务 */
@@ -343,16 +420,51 @@ function rewriteAuthRealm(res: Response, urlObj: URL, cfg: Config): Response {
     })
 }
 
-/** docker 路径响应：明确不可缓存，避免私有镜像内容进入共享缓存 */
-function dockerResponse(res: Response): Response {
+/**
+ * docker 路径响应：
+ * - 只有公开命名空间的 blob（200）允许公共缓存（含 zone 边缘），重复拉取可直接命中
+ * - manifest 有内容协商，客户端侧仍 no-store，缓存由 Worker 的 Cache API 承担
+ * - 私有仓库、token、错误、部分响应一律 private, no-store
+ */
+function dockerResponse(res: Response, cacheStatus: 'HIT' | 'MISS' | 'BYPASS', target: DockerTarget): Response {
     const headers = new Headers(res.headers)
-    headers.set('cache-control', 'private, no-store')
-    headers.set(CACHE_STATUS_HEADER, 'BYPASS')
+    headers.set(CACHE_STATUS_HEADER, cacheStatus)
+    const publicBlob = target.kind === 'blobs' && res.status === 200 && cacheStatus !== 'BYPASS'
+    if (publicBlob) {
+        headers.set('cache-control', `public, max-age=${IMMUTABLE_TTL}, immutable`)
+    } else {
+        headers.set('cache-control', 'private, no-store')
+    }
     return new Response(res.body, {
         status: res.status,
         statusText: res.statusText,
         headers,
     })
+}
+
+/** 反代 auth.docker.io/token，客户端无需直连该域名 */
+async function tokenHandler(req: Request, urlObj: URL, cfg: Config): Promise<Response> {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+        return new Response('method not allowed', {
+            status: 405,
+            headers: { 'allow': 'GET, HEAD', 'cache-control': 'no-store' },
+        })
+    }
+    const limited = await checkRateLimit(req, cfg)
+    if (limited) {
+        return limited
+    }
+    const tokenUrl = new URL('https://auth.docker.io/token')
+    tokenUrl.search = urlObj.search
+    // Basic 凭据（docker login）随请求头透传；匿名请求不带该头
+    // token 与调用方凭据绑定，绝不进任何缓存
+    const res = await proxy(tokenUrl, {
+        method: 'GET',
+        headers: new Headers(req.headers),
+        redirect: 'manual',
+        signal: req.signal,
+    }, cfg)
+    return dockerResponse(res, 'BYPASS', { repo: null, kind: 'other' })
 }
 
 /**

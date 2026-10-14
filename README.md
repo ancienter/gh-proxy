@@ -105,8 +105,9 @@ CI（GitHub Actions）执行类型生成一致性检查、`typecheck`、`test` �
 
 `DOCKER="1"` 时本服务同时充当 Docker Hub 只读镜像：`/v2/*` 与 `/token` 均由本服务提供，客户端不需要能访问 `auth.docker.io`。实现计划与阶段见 [docs/docker-hub-mirror.md](docs/docker-hub-mirror.md)。
 
-- 仅支持拉取（GET/HEAD），push 一律 405
-- 不做任何缓存：docker 响应一律 `cache-control: private, no-store`、`x-proxy-cache: BYPASS`（私有镜像内容不能进共享缓存）
+- **支持范围**：仅 Docker Hub（`registry-1.docker.io` + `auth.docker.io`）；不支持 ghcr.io / quay.io / registry.k8s.io；不支持 push（PUT/POST/PATCH 一律 405）
+- **缓存**：仅 `DOCKER_CACHE` 白名单内的**公开命名空间**（默认 `library`）进缓存 —— manifest 按 `Accept` 分桶（tag 5 分钟、digest 1 年），blob 按 digest 不可变（1 年，且允许 zone 边缘缓存，重复拉取更快）。私有仓库、token、错误响应与 401 一律 `cache-control: private, no-store`、`x-proxy-cache: BYPASS`
+- **不建议缓存 token**：token 与调用方凭据绑定，缓存会造成凭据泄露；降低 pull 计数靠 manifest 缓存
 - **强烈建议先 `docker login`**：未认证拉取按共享出口 IP 计（Docker Hub：100 次 manifest/6 小时），认证后按账号计（Personal 200/6h，Pro/Team/Business 无限）
 
 docker（`/etc/docker/daemon.json` 后重启，或直接 `docker pull gh-proxy.7s.pub/library/alpine:latest`）：

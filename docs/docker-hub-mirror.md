@@ -77,7 +77,19 @@
     `sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6`，与源站一致
 - [ ] **P5 观测与收尾**
   - 观察日志与 429 比例（目前未出现 Docker 侧限流）；决定是否强制登录（拒绝无 Basic 的 `/token`）
-  - README 已补配置片段（daemon.json / containerd / podman）与"强烈建议 docker login"说明
+  - README 已补配置片段（daemon.json / containerd / podman）与"强烈建议 docker login"说明；首页已加 Docker 使用说明
+- [x] **P7 registry 内容缓存（2026-10-13 追加，源自运营反馈）**
+  - 问题：全程 `BYPASS` 导致重复拉取无提速，且 manifest 请求持续消耗共享出口 IP 的匿名额度
+  - 方案：新增 `DOCKER_CACHE`（默认 `library`）白名单，只缓存**公开命名空间**的 manifest 与 blob
+    - manifest：缓存键加入 `Accept` 哈希（内容协商不能串味）；tag 引用 `max-age=300`，digest 引用一年
+    - blob：按 digest 不可变，`max-age=31536000, immutable`，允许 zone 边缘缓存；Range 命中缓存直接切片
+    - 私有仓库、token、401、错误响应、非 200 一律 `private, no-store`
+  - **明确不做 token 缓存**：token 与调用方凭据绑定，缓存等于凭据泄露
+  - 验收：单测覆盖 Accept 分桶、白名单外绕过、blob 命中与 Range；生产实测 manifest/blob HIT
+- [ ] **P8 多 registry（待定，需先定产品范围）**
+  - 现状：`/v2/ghcr.io/...` 等不代理。扩展需要按 registry 设计路由（路径前缀或独立域名）+ 各自 realm
+    与 token 流程 + 各自的匿名限额策略
+  - 同时评估 ghcr / quay / registry.k8s.io 的必要性与维护成本
 - [ ] **P6 回滚**：`DOCKER=0` 重新部署，`/v2/*` 恢复 404
 
 ## 风险

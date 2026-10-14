@@ -754,7 +754,7 @@ describe('docker hub mirror', () => {
             return null
         }
 
-        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:deadbeef', {
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:samehost', {
             headers: { authorization: 'Bearer tok' },
         }, docker)
         expect(res.status).toBe(200)

@@ -732,6 +732,31 @@ describe('docker hub mirror', () => {
         expect(res.headers.get('x-cache')).toBeNull()
     })
 
+    it('serves HEAD probes from the cache once a blob is cached', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:headcache'
+        let upstreamCalls = 0
+        responder = (call) => {
+            if (call.url.href !== blob) {
+                return null
+            }
+            upstreamCalls++
+            if (call.method === 'HEAD') {
+                return new Response(null, { status: 200, headers: { 'content-length': '10', 'docker-content-digest': 'sha256:headcache' } })
+            }
+            return new Response('0123456789', {
+                status: 200,
+                headers: { 'content-length': '10', 'docker-content-digest': 'sha256:headcache' },
+            })
+        }
+
+        await call('https://example.com/v2/library/alpine/blobs/sha256:headcache', undefined, docker)
+        const head = await call('https://example.com/v2/library/alpine/blobs/sha256:headcache', { method: 'HEAD' }, docker)
+        expect(head.status).toBe(200)
+        expect(head.headers.get('content-length')).toBe('10')
+        expect(head.headers.get('x-proxy-cache')).toBe('HIT')
+        expect(upstreamCalls).toBe(1)
+    })
+
     it('passes HEAD through for blob existence checks', async () => {
         const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:beef'
         responder = route('HEAD', blob, () => new Response(null, {

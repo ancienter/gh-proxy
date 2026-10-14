@@ -107,6 +107,8 @@ CI（GitHub Actions）执行类型生成一致性检查、`typecheck`、`test` �
 
 - **支持范围**：仅 Docker Hub（`registry-1.docker.io` + `auth.docker.io`）；不支持 ghcr.io / quay.io / registry.k8s.io；不支持 push（PUT/POST/PATCH 一律 405）
 - **缓存**：仅 `DOCKER_CACHE` 白名单内的**公开命名空间**（默认 `library`）进缓存 —— manifest 按 `Accept` 分桶（tag 5 分钟、digest 1 年），blob 按 digest 不可变（1 年）。**blob 缓存上限 100MB**：实测 68MB 可稳定缓存、237MB 在 Worker 与边缘缓存中都不被保留（CF 文档标称 512MB，实际更大对象会失败），超限对象只流式转发不缓存。私有仓库、token、错误响应与 401 一律 `cache-control: private, no-store`、`x-proxy-cache: BYPASS`；响应会去掉上游 CDN 的 `age`/`x-cache` 等痕迹，避免误判缓存状态
+- **Range 与 HEAD**：Range 与整段 GET 共用同一个缓存键（实测已缓存的 68MB 层连续 4 次 Range 全部 HIT，0.13–0.66s）；只有「该 blob 曾被整段拉取并缓存」时 Range/HEAD 才会命中，超过 100MB 上限的层每次都会回源，因此看起来"Range 有时 HIT 有时 MISS"。HEAD 探测在缓存命中时直接由缓存返回头部
+- **读缓存状态**：`cf-cache-status` = 边缘缓存；`x-proxy-cache` = Worker 缓存，且是**写入时刻的快照**（边缘复用的响应会保留旧值）
 - **不建议缓存 token**：token 与调用方凭据绑定，缓存会造成凭据泄露；降低 pull 计数靠 manifest 缓存
 - **强烈建议先 `docker login`**：未认证拉取按共享出口 IP 计（Docker Hub：100 次 manifest/6 小时），认证后按账号计（Personal 200/6h，Pro/Team/Business 无限）。Basic 凭据透传链路已用伪造凭据验证（Docker 返回 `401 incorrect username or password`），真实账号的额度归属需用你自己的凭据实测
 

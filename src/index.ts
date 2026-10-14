@@ -302,32 +302,17 @@ async function dockerHandler(req: Request, urlObj: URL, cfg: Config, ctx: Execut
     }
 
     const target = parseDockerPath(urlObj.pathname)
-    const cacheable = req.method === 'GET' &&
-        (target.kind === 'blobs' || target.kind === 'manifests') &&
-        isPublicRepo(target.repo, cfg)
-    const cacheKey = dockerCacheKey(target, urlObj, req)
+    const publicRepo = (target.kind === 'blobs' || target.kind === 'manifests') && isPublicRepo(target.repo, cfg)
+    const cacheKey = publicRepo ? dockerCacheKey(target, urlObj, req) : null
+    // HEAD 也查缓存：探测大层时命中即可省回源；只有 GET 会写入
+    const canLookup = cacheKey !== null && (req.method === 'GET' || req.method === 'HEAD')
 
-    if (cacheable && cacheKey) {
+    if (canLookup && cacheKey) {
         const cache = await caches.open(CACHE_NAME)
         const hit = await cache.match(dockerMatchRequest(cacheKey, req, target.kind === 'blobs'), { ignoreMethod: true })
         if (hit) {
-            return dockerResponse(hit, 'HIT', target)
+            return dockerResponse(req.method === 'HEAD' ? headResponse(hit) : hit, 'HIT', target)
         }
-        const registryUrl = dockerUpstreamUrl(urlObj, cfg)
-        const res = await proxy(registryUrl, {
-            method: req.method,
-            headers: new Headers(req.headers),
-            redirect: 'manual',
-            signal: req.signal,
-        }, cfg)
-        if (res.status === 200 && isStorable(res, target.kind === 'blobs' ? DOCKER_BLOB_CACHE_MAX : CACHE_MAX_BYTES)) {
-            const ttl = dockerTtl(target, urlObj.pathname)
-            const cloned = res.clone()
-            const stored = new Response(cloned.body, cloned)
-            stored.headers.set('cache-control', `public, max-age=${ttl}${ttl === IMMUTABLE_TTL ? ', immutable' : ''}`)
-            ctx.waitUntil(cache.put(cacheKey, stored).catch(() => { }))
-        }
-        return dockerResponse(res.status === 401 ? rewriteAuthRealm(res, urlObj, cfg) : res, 'MISS', target)
     }
 
     const registryUrl = dockerUpstreamUrl(urlObj, cfg)
@@ -337,7 +322,18 @@ async function dockerHandler(req: Request, urlObj: URL, cfg: Config, ctx: Execut
         redirect: 'manual',
         signal: req.signal,
     }, cfg)
-    return dockerResponse(res.status === 401 ? rewriteAuthRealm(res, urlObj, cfg) : res, 'BYPASS', target)
+
+    if (canLookup && cacheKey && req.method === 'GET' && res.status === 200 &&
+        isStorable(res, target.kind === 'blobs' ? DOCKER_BLOB_CACHE_MAX : CACHE_MAX_BYTES)) {
+        const cache = await caches.open(CACHE_NAME)
+        const ttl = dockerTtl(target, urlObj.pathname)
+        const cloned = res.clone()
+        const stored = new Response(cloned.body, cloned)
+        stored.headers.set('cache-control', `public, max-age=${ttl}${ttl === IMMUTABLE_TTL ? ', immutable' : ''}`)
+        ctx.waitUntil(cache.put(cacheKey, stored).catch(() => { }))
+    }
+
+    return dockerResponse(res.status === 401 ? rewriteAuthRealm(res, urlObj, cfg) : res, canLookup ? 'MISS' : 'BYPASS', target)
 }
 
 function dockerUpstreamUrl(urlObj: URL, cfg: Config): URL {

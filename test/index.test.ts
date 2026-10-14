@@ -758,15 +758,16 @@ describe('docker hub mirror', () => {
     })
 
     it('passes HEAD through for blob existence checks', async () => {
-        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:beef'
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:headprobe'
         responder = route('HEAD', blob, () => new Response(null, {
             status: 200,
-            headers: { 'content-length': '1024', 'docker-content-digest': 'sha256:beef' },
+            headers: { 'content-length': '1024', 'docker-content-digest': 'sha256:headprobe' },
         }))
 
-        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:beef', { method: 'HEAD' }, docker)
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:headprobe', { method: 'HEAD' }, docker)
         expect(res.status).toBe(200)
         expect(res.headers.get('content-length')).toBe('1024')
+        expect(res.headers.get('x-proxy-cache')).toBe('MISS')
         expect(calls[0].method).toBe('HEAD')
     })
 

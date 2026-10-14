@@ -65,18 +65,19 @@
 - [x] **P2 `/token` 反代**
   - 查询参数与 Basic 透传，JSON 原样返回，`no-store`
   - 验收：单测通过；生产 curl 能换到 token
-- [ ] **P3 预发验证（开关打开）**
+- [x] **P3 预发验证（开关打开）**
   - 验收：`/v2/` 返回 401 且 realm 指向本服务；manifest 200 带 `Docker-Content-Digest`；
     blob 下载 SHA256 == digest；Range 206；日志 `cache: BYPASS`
-  - 实测记录：token ✅、manifest index/amd64 manifest ✅（body SHA256 == `docker-content-digest`）、
-    blob SHA256 ✅、Range 206 ✅。真实 CDN 主机为 `production.cloudfront.docker.com`（已加入白名单），
-    修正前 307 由客户端直连 CDN 完成，修正后应由本服务跟随
-- [ ] **P4 真实客户端验证**
-  - `docker pull gh-proxy.7s.pub/library/alpine:latest`；失败时以 containerd/podman 或 curl 仿真
-    为准并记录原因（宿主机网络限制不算阻塞）
+  - 实测记录（2026-10-13）：token ✅、manifest index 与 amd64 manifest ✅（响应体 SHA256 ==
+    `docker-content-digest`）、blob SHA256 ✅、Range 206 ✅。真实 CDN 主机为
+    `production.cloudfront.docker.com`（已加入白名单），修正前 307 由客户端直连 CDN 完成，
+    修正后由本服务跟随（实测客户端只见 200）
+- [x] **P4 真实客户端验证**
+  - `docker pull gh-proxy.7s.pub/library/alpine:latest` 成功，拉取后 digest 为
+    `sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6`，与源站一致
 - [ ] **P5 观测与收尾**
-  - 看日志与 429 比例；决定是否强制登录（拒绝无 Basic 的 `/token`）；README 补配置片段
-    （daemon.json / containerd mirrors / podman registries.conf）与"强烈建议 docker login"说明
+  - 观察日志与 429 比例（目前未出现 Docker 侧限流）；决定是否强制登录（拒绝无 Basic 的 `/token`）
+  - README 已补配置片段（daemon.json / containerd / podman）与"强烈建议 docker login"说明
 - [ ] **P6 回滚**：`DOCKER=0` 重新部署，`/v2/*` 恢复 404
 
 ## 风险

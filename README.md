@@ -101,6 +101,36 @@ npm run deploy
 
 CI（GitHub Actions）执行类型生成一致性检查、`typecheck`、`test` 和 `wrangler deploy --dry-run`。
 
+### Docker Hub 只读镜像（可选）
+
+`DOCKER="1"` 时本服务同时充当 Docker Hub 只读镜像：`/v2/*` 与 `/token` 均由本服务提供，客户端不需要能访问 `auth.docker.io`。实现计划与阶段见 [docs/docker-hub-mirror.md](docs/docker-hub-mirror.md)。
+
+- 仅支持拉取（GET/HEAD），push 一律 405
+- 不做任何缓存：docker 响应一律 `cache-control: private, no-store`、`x-proxy-cache: BYPASS`（私有镜像内容不能进共享缓存）
+- **强烈建议先 `docker login`**：未认证拉取按共享出口 IP 计（Docker Hub：100 次 manifest/6 小时），认证后按账号计（Personal 200/6h，Pro/Team/Business 无限）
+
+docker（`/etc/docker/daemon.json` 后重启，或直接 `docker pull gh-proxy.7s.pub/library/alpine:latest`）：
+
+```json
+{ "registry-mirrors": ["https://gh-proxy.7s.pub"] }
+```
+
+containerd（`/etc/containerd/config.toml`）：
+
+```toml
+[plugins."io.containerd.grpc.v1.cri".registry.mirrors]
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+    endpoint = ["https://gh-proxy.7s.pub"]
+```
+
+podman（`/etc/containers/registries.conf`）：
+
+```toml
+[[registry]]
+prefix = "docker.io"
+location = "gh-proxy.7s.pub"
+```
+
 ## Cloudflare Workers计费
 
 到 `overview` 页面可参看使用情况。免费版每天有 10 万次免费请求，并且有每分钟1000次请求的限制。

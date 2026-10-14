@@ -70,6 +70,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}): Env => ({
     PREFIX: '/',
     DOCKER: '0',
     DOCKER_CACHE: 'library',
+    DEBUG_AUTH: '0',
     JSDELIVR: '0',
     WHITE_LIST: '',
     RATE_LIMITER: { limit: async () => ({ success: true }) },
@@ -857,6 +858,67 @@ describe('docker hub mirror', () => {
         expect(tokenQuery).toBe('?service=registry.docker.io&scope=repository:library/alpine:pull')
         expect(tokenAuth).toBe('Basic dXNlcjpwYXNz')
         expect(res.headers.get('cache-control')).toBe('private, no-store')
+    })
+
+    it('does not replay stale upstream rate limit headers on cache hits', async () => {
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:ratelimit'
+        responder = route('GET', blob, () => new Response('x', {
+            status: 200,
+            headers: {
+                'content-length': '1',
+                'ratelimit-remaining': '190;w=21600',
+                'docker-ratelimit-source': 'user',
+            },
+        }))
+
+        const first = await call('https://example.com/v2/library/alpine/blobs/sha256:ratelimit', undefined, docker)
+        expect(first.headers.get('ratelimit-remaining')).toBe('190;w=21600')
+        const second = await call('https://example.com/v2/library/alpine/blobs/sha256:ratelimit', undefined, docker)
+        expect(second.headers.get('x-proxy-cache')).toBe('HIT')
+        expect(second.headers.get('ratelimit-remaining')).toBeNull()
+        expect(second.headers.get('docker-ratelimit-source')).toBeNull()
+    })
+
+    it('omits auth from logs by default', async () => {
+        const spy = vi.spyOn(console, 'log').mockImplementation(() => { })
+        try {
+            responder = route('GET', 'https://registry-1.docker.io/v2/', () =>
+                new Response('{}', { status: 401, headers: { 'www-authenticate': 'Bearer realm="https://auth.docker.io/token"' } }))
+            await call('https://example.com/v2/', undefined, docker)
+            const logged = JSON.parse(String(spy.mock.calls[0][0]))
+            expect(logged.auth).toBeUndefined()
+        } finally {
+            spy.mockRestore()
+        }
+    })
+
+    it('logs basic auth on /token and the token subject on /v2 when DEBUG_AUTH=1', async () => {
+        const spy = vi.spyOn(console, 'log').mockImplementation(() => { })
+        try {
+            responder = (call) => {
+                if (call.url.origin === 'https://auth.docker.io') {
+                    return new Response('{"token":"t"}', { status: 200 })
+                }
+                if (call.url.origin === 'https://registry-1.docker.io') {
+                    return new Response('{}', { status: 200 })
+                }
+                return null
+            }
+            const sub = '11111111-2222-3333-4444-555555555555'
+            const payload = btoa(JSON.stringify({ sub })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+            const jwt = `header.${payload}.signature`
+            const debugEnv = { DOCKER: '1', DEBUG_AUTH: '1' }
+
+            await call('https://example.com/token?service=registry.docker.io&scope=repository:library/alpine:pull',
+                { headers: { authorization: 'Basic dXNlcjpwYXNz' } }, debugEnv)
+            await call('https://example.com/v2/library/alpine/manifests/latest',
+                { headers: { authorization: `Bearer ${jwt}` } }, debugEnv)
+
+            expect(JSON.parse(String(spy.mock.calls[0][0])).auth).toBe('basic')
+            expect(JSON.parse(String(spy.mock.calls[1][0])).auth).toBe(`bearer sub=${sub}`)
+        } finally {
+            spy.mockRestore()
+        }
     })
 
     it('rate limits docker requests', async () => {

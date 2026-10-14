@@ -110,7 +110,9 @@ CI（GitHub Actions）执行类型生成一致性检查、`typecheck`、`test` �
 - **Range 与 HEAD**：Range 与整段 GET 共用同一个缓存键（实测已缓存的 68MB 层连续 4 次 Range 全部 HIT，0.13–0.66s）；只有「该 blob 曾被整段拉取并缓存」时 Range/HEAD 才会命中，超过 100MB 上限的层每次都会回源，因此看起来"Range 有时 HIT 有时 MISS"。HEAD 探测在缓存命中时直接由缓存返回头部
 - **读缓存状态**：`cf-cache-status` = 边缘缓存；`x-proxy-cache` = Worker 缓存，且是**写入时刻的快照**（边缘复用的响应会保留旧值）
 - **不建议缓存 token**：token 与调用方凭据绑定，缓存会造成凭据泄露；降低 pull 计数靠 manifest 缓存
-- **强烈建议先 `docker login`**：未认证拉取按共享出口 IP 计（Docker Hub：100 次 manifest/6 小时），认证后按账号计（Personal 200/6h，Pro/Team/Business 无限）。Basic 凭据透传链路已用伪造凭据验证（Docker 返回 `401 incorrect username or password`），真实账号的额度归属需用你自己的凭据实测
+- **登录镜像本身即可（不是登录 Hub）**：`docker login gh-proxy.7s.pub`。凭据由本服务透传给 Docker Hub 换取 token，配额按你的账号计（Personal 200/6h；Pro/Team/Business 无限）；未认证拉取按共享出口 IP 计（100 次 manifest / 6 小时）
+- **限额观测**：缓存命中（`x-proxy-cache: HIT`）的响应**不携带** `ratelimit-*` 头（命中会回放陈旧值，避免数字前后矛盾）；需要真实剩余额度时，对未缓存对象请求一次看上游头部
+- **审计开关 `DEBUG_AUTH=1`**（默认 `0`，仅诊断用）：日志会附带 `auth: basic` / `auth: bearer sub=<UUID>`，用于核对"加速模式拉取是否走了本人账号额度"；核对完记得关掉
 
 docker（`/etc/docker/daemon.json` 后重启，或直接 `docker pull gh-proxy.7s.pub/library/alpine:latest`）：
 

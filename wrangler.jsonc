@@ -42,6 +42,8 @@
     "DOCKER": "1",
     // Docker Hub 可缓存命名空间白名单（逗号分隔；空 = 不缓存任何 docker 内容）
     "DOCKER_CACHE": "library",
+    // 认证诊断开关（'1' 时日志附带 auth: basic|bearer sub=...，仅用于一次性核对，平时保持 0）
+    "DEBUG_AUTH": "0",
     // 分支文件使用 jsDelivr 镜像的开关，0 为关闭
     "JSDELIVR": "0",
     // 白名单，逗号分隔，路径中包含任一字符才通过，留空表示不限制

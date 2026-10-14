@@ -147,7 +147,8 @@
     <p><strong>Docker Hub 只读镜像</strong>（仅公共镜像拉取，不支持 push）</p>
     <p>直接拉取：<code>docker pull gh-proxy.7s.pub/library/alpine:latest</code></p>
     <p>或写入 <code>/etc/docker/daemon.json</code> 后重启 docker：<code>{"registry-mirrors": ["https://gh-proxy.7s.pub"]}</code></p>
-    <p>未认证拉取按共享出口 IP 计限额（Docker Hub 100 次 manifest / 6 小时），建议先 <code>docker login</code>，认证后按账号计</p>
+    <p>登录镜像本身（<strong>不是</strong>登录 Hub）：<code>docker login gh-proxy.7s.pub</code>，凭据会透传给 Docker Hub，配额按你的账号计</p>
+    <p>未认证拉取按共享出口 IP 计限额（Docker Hub 100 次 manifest / 6 小时），建议先登录</p>
 </div>
 </body>
 </html>

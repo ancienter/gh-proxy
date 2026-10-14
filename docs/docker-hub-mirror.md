@@ -79,7 +79,16 @@
   - 观察日志与 429 比例（目前未出现 Docker 侧限流）；决定是否强制登录（拒绝无 Basic 的 `/token`）
   - README 已补配置片段（daemon.json / containerd / podman）与"强烈建议 docker login"说明；首页已加 Docker 使用说明
   - 认证链路验证（2026-10-13）：伪造 Basic 凭据请求 `/token` 时 Docker 返回 `401 incorrect username or password`
-    → 凭据确实透传到 auth.docker.io；真实账号的额度归属需用户凭据实测
+    → 凭据确实透传到 auth.docker.io
+  - 真实账号实测（2026-10-13，用户侧）：协议级 `/token` + Basic 换到账号 token（`sub` = 账号 UUID，
+    source=账号名）；显式拉取与加速模式（`registry-mirrors`）均有账号配额扣减。上游 `ratelimit-*`
+    计数存在噪声（缓存回放旧值、不同 POP 填充不一致），不能作为唯一证据
+  - 为此已实现两项服务端支持：
+    - `DEBUG_AUTH=1`（默认 0）：日志附加 `auth: basic|bearer sub=<UUID>`，只在日志、不进响应；
+      待执行：开启后做一次加速模式 pull，在 Workers Logs 核对 `/token` 的 `auth: basic` 与
+      manifest 的 `auth: bearer sub=<账号 UUID>`
+    - 缓存命中（HIT）响应不再回放上游 `ratelimit-*` 头，避免展示前后矛盾的数字
+  - 文档已明确登录命令为 `docker login gh-proxy.7s.pub`（登录镜像，不是登录 Hub）
 - [x] **P7 registry 内容缓存（2026-10-13 追加，源自运营反馈）**
   - 问题：全程 `BYPASS` 导致重复拉取无提速，且 manifest 请求持续消耗共享出口 IP 的匿名额度
   - 方案：新增 `DOCKER_CACHE`（默认 `library`）白名单，只缓存**公开命名空间**的 manifest 与 blob

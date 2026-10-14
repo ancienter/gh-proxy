@@ -41,6 +41,7 @@ interface Config {
     jsdelivr: boolean
     docker: boolean
     dockerCache: string[]
+    debugAuth: boolean
     whiteList: string[]
     assets: Fetcher | null
     limiter?: RateLimit
@@ -114,6 +115,7 @@ function getConfig(env: Env): Config {
         jsdelivr: truthy(env.JSDELIVR),
         docker: truthy(env.DOCKER),
         dockerCache: String(env.DOCKER_CACHE || '').split(',').map(s => s.trim()).filter(Boolean),
+        debugAuth: truthy(env.DEBUG_AUTH),
         whiteList: String(env.WHITE_LIST || '').split(',').map(s => s.trim()).filter(Boolean),
         assets: env.ASSETS || null,
         limiter: env.RATE_LIMITER,
@@ -188,6 +190,35 @@ async function checkRateLimit(req: Request, cfg: Config): Promise<Response | nul
     })
 }
 
+/** 认证诊断：只写日志，绝不放进响应（DEBUG_AUTH=1 时生效） */
+function authDebug(request: Request): string {
+    const authorization = request.headers.get('authorization') || ''
+    if (/^basic /i.test(authorization)) {
+        return 'basic'
+    }
+    if (/^bearer /i.test(authorization)) {
+        return 'bearer sub=' + (jwtSub(authorization) || 'unknown')
+    }
+    return 'none'
+}
+
+/** 从 JWT 形式的 registry token 里取 sub（不校验签名，仅用于审计） */
+function jwtSub(authorization: string): string | null {
+    const token = authorization.replace(/^bearer\s+/i, '')
+    const parts = token.split('.')
+    if (parts.length < 2) {
+        return null
+    }
+    try {
+        const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+        const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4)
+        const claims = JSON.parse(atob(padded))
+        return typeof claims.sub === 'string' ? claims.sub : null
+    } catch (err) {
+        return null
+    }
+}
+
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
         const start = Date.now()
@@ -207,6 +238,7 @@ export default {
                 status: res.status,
                 ms: Date.now() - start,
                 cache: cache || 'none',
+                ...(cfg.debugAuth ? { auth: authDebug(request) } : {}),
             }))
         }
         return res
@@ -431,6 +463,14 @@ function dockerResponse(res: Response, cacheStatus: 'HIT' | 'MISS' | 'BYPASS', t
     // 去掉上游 CDN 的缓存痕迹（CloudFront 常驻几十天的 age 会让人误判缓存状态）
     for (const name of ['age', 'via', 'x-cache', 'x-cache-hits', 'x-served-by', 'x-timer']) {
         headers.delete(name)
+    }
+    // 缓存命中会回放上游限额头（陈旧值），会与真实额度前后矛盾，直接不展示
+    if (cacheStatus === 'HIT') {
+        for (const name of [...headers.keys()]) {
+            if (name.startsWith('ratelimit-') || name.startsWith('docker-ratelimit-')) {
+                headers.delete(name)
+            }
+        }
     }
     const publicBlob = target.kind === 'blobs' && res.status === 200 && cacheStatus !== 'BYPASS'
     if (publicBlob) {

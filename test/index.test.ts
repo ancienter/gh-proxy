@@ -740,7 +740,7 @@ describe('docker hub mirror', () => {
     })
 
     it('keeps Authorization on same-host redirects', async () => {
-        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:deadbeef'
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:samehost'
         const redirected = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:redirected'
         let seenAuth: string | null = null
         responder = (call) => {
@@ -762,11 +762,11 @@ describe('docker hub mirror', () => {
     })
 
     it('does not follow redirects to hosts outside the allowlist', async () => {
-        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:deadbeef'
+        const blob = 'https://registry-1.docker.io/v2/library/alpine/blobs/sha256:blocked'
         responder = route('GET', blob, () =>
             new Response(null, { status: 307, headers: { location: 'https://example.com/evil' } }))
 
-        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:deadbeef', undefined, docker)
+        const res = await call('https://example.com/v2/library/alpine/blobs/sha256:blocked', undefined, docker)
         expect(res.status).toBe(307)
         expect(res.headers.get('location')).toBe('https://example.com/evil')
         expect(calls).toHaveLength(1)
